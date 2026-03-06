@@ -64,6 +64,7 @@ impl From<ExspecConfig> for Config {
             parameterized_min_ratio: ec
                 .thresholds
                 .parameterized_min_ratio
+                .filter(|v| v.is_finite())
                 .unwrap_or(defaults.parameterized_min_ratio)
                 .clamp(0.0, 1.0),
             disabled_rules: ec.rules.disable.iter().map(|s| RuleId::new(s)).collect(),
@@ -203,6 +204,42 @@ mod tests {
         };
         let config: Config = ec.into();
         assert_eq!(config.parameterized_min_ratio, 1.0);
+    }
+
+    #[test]
+    fn convert_nan_ratio_falls_back_to_default() {
+        let content = fixture("nan_ratio.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        let config: Config = ec.into();
+        let defaults = Config::default();
+        assert_eq!(
+            config.parameterized_min_ratio, defaults.parameterized_min_ratio,
+            "NaN should fall back to default"
+        );
+    }
+
+    #[test]
+    fn convert_inf_ratio_falls_back_to_default() {
+        let content = fixture("inf_ratio.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        let config: Config = ec.into();
+        let defaults = Config::default();
+        assert_eq!(
+            config.parameterized_min_ratio, defaults.parameterized_min_ratio,
+            "Inf should fall back to default"
+        );
+    }
+
+    #[test]
+    fn convert_neg_inf_ratio_falls_back_to_default() {
+        let content = fixture("neg_inf_ratio.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        let config: Config = ec.into();
+        let defaults = Config::default();
+        assert_eq!(
+            config.parameterized_min_ratio, defaults.parameterized_min_ratio,
+            "-Inf should fall back to default"
+        );
     }
 
     #[test]

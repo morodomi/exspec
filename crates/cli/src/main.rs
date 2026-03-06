@@ -425,6 +425,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // --- Hidden directory skip ---
+
+    #[test]
+    fn discover_files_skips_hidden_directories() {
+        let dir = std::env::temp_dir().join(format!("exspec_test_hidden_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".hidden")).unwrap();
+        std::fs::write(dir.join(".hidden/test_foo.py"), "").unwrap();
+        std::fs::write(dir.join("test_visible.py"), "").unwrap();
+        let (py, _) = discover_test_files(dir.to_str().unwrap(), None);
+        assert_eq!(py.len(), 1, "should only find visible file: {py:?}");
+        assert!(py[0].contains("test_visible.py"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- Config loading ---
 
     #[test]

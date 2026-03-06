@@ -121,6 +121,25 @@ struct TestMatch {
     decorated_start_row: Option<usize>,
 }
 
+fn is_in_non_test_class(root: Node, start_byte: usize, end_byte: usize, source: &[u8]) -> bool {
+    let Some(node) = root.descendant_for_byte_range(start_byte, end_byte) else {
+        return false;
+    };
+    let mut current = node.parent();
+    while let Some(parent) = current {
+        if parent.kind() == "class_definition" {
+            if let Some(name_node) = parent.child_by_field_name("name") {
+                if let Ok(name) = name_node.utf8_text(source) {
+                    return !name.starts_with("Test") && !name.starts_with("test_");
+                }
+            }
+            return true; // class without parseable name -> exclude
+        }
+        current = parent.parent();
+    }
+    false // module-level -> not in non-test class
+}
+
 fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec<TestFunction> {
     let test_query = cached_query(&TEST_QUERY_CACHE, TEST_FUNCTION_QUERY);
     let assertion_query = cached_query(&ASSERTION_QUERY_CACHE, ASSERTION_QUERY);
@@ -192,6 +211,13 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
 
     test_matches
         .retain(|tm| tm.decorated_start_byte.is_some() || !decorated_fn_ids.contains(&tm.dedup_id));
+
+    // Filter out methods in non-test classes (e.g., UserService.test_connection)
+    test_matches.retain(|tm| {
+        let check_byte = tm.decorated_start_byte.unwrap_or(tm.fn_start_byte);
+        let check_end = tm.decorated_end_byte.unwrap_or(tm.fn_end_byte);
+        !is_in_non_test_class(root, check_byte, check_end, source_bytes)
+    });
 
     let mut functions = Vec::new();
     for tm in &test_matches {
@@ -518,6 +544,61 @@ mod tests {
         let extractor = PythonExtractor::new();
         let fa = extractor.extract_file_analysis(&source, "t008_violation.py");
         assert!(!fa.has_contract_import);
+    }
+
+    // --- Class method false positive filtering ---
+
+    #[test]
+    fn class_method_in_non_test_class_excluded() {
+        let source = fixture("test_class_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_class_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            !names.contains(&"test_connection"),
+            "UserService.test_connection should be excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_health"),
+            "UserService.test_health should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn class_method_in_test_class_included() {
+        let source = fixture("test_class_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_class_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_create"),
+            "TestUser.test_create should be included: {names:?}"
+        );
+        assert!(
+            names.contains(&"test_delete"),
+            "TestUser.test_delete should be included: {names:?}"
+        );
+    }
+
+    #[test]
+    fn standalone_test_function_included() {
+        let source = fixture("test_class_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_class_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_standalone"),
+            "module-level test_standalone should be included: {names:?}"
+        );
+    }
+
+    #[test]
+    fn decorated_class_method_in_test_class_included() {
+        let source = fixture("test_class_decorated.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_class_decorated.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "test_create");
     }
 
     // --- File analysis preserves functions ---

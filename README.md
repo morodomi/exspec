@@ -50,7 +50,6 @@ Score: BLOCK 1 | WARN 2 | INFO 0 | PASS 7
 exspec .                      # Terminal (default)
 exspec --format json .        # JSON
 exspec --format sarif .       # SARIF (GitHub Code Scanning)
-exspec --format ai-prompt .   # AI review prompts (Tier 3)
 ```
 
 ## Supported Languages
@@ -170,6 +169,18 @@ RED Phase (test written)
 |------|---------|
 | 0 | No BLOCK violations (default) / No WARN+ (--strict) |
 | 1 | BLOCK violations found (default) / WARN+ found (--strict) |
+
+## Score Semantics
+
+The `PASS` count in the output score line represents test functions without violations:
+
+```
+PASS = total_test_functions - unique_violated_functions
+```
+
+- A test function with **multiple violations** (e.g., both T001 and T003) counts as **1** violated function, not 2.
+- **File-level diagnostics** (T004, T005, T006, T008) and **project-level diagnostics** (T007) do **not** reduce the PASS count. Only per-function rules (T001-T003) affect it.
+- Uniqueness is determined by `(file, line)` pair.
 
 ## Contributing
 

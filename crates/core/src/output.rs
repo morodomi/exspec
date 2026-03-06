@@ -8,7 +8,6 @@ pub enum OutputFormat {
     Terminal,
     Json,
     Sarif,
-    AiPrompt,
 }
 
 /// Count unique violated functions by (file, line) pairs.
