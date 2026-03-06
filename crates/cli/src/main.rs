@@ -731,6 +731,61 @@ mod tests {
         );
     }
 
+    // PHP E2E: FQCN attribute and Pest arrow function
+    #[test]
+    fn e2e_php_fqcn_attribute_pass() {
+        let extractor = PhpExtractor::new();
+        let path = fixture_path("php", "t001_pass_fqcn_attribute.php");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let funcs = extractor.extract_test_functions(&source, &path);
+        assert_eq!(
+            funcs.len(),
+            1,
+            "should detect 1 test function via FQCN attribute"
+        );
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(
+            diags.is_empty(),
+            "FQCN attribute test should pass, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_pest_arrow_pass() {
+        let extractor = PhpExtractor::new();
+        let path = fixture_path("php", "t001_pass_pest_arrow.php");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let funcs = extractor.extract_test_functions(&source, &path);
+        assert_eq!(
+            funcs.len(),
+            1,
+            "should detect 1 test function via Pest arrow"
+        );
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(
+            diags.is_empty(),
+            "Pest arrow test should pass, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_pest_arrow_chained_pass() {
+        let extractor = PhpExtractor::new();
+        let path = fixture_path("php", "t001_pass_pest_arrow_chained.php");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let funcs = extractor.extract_test_functions(&source, &path);
+        assert_eq!(
+            funcs.len(),
+            1,
+            "should detect 1 test function via Pest arrow chained"
+        );
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(
+            diags.is_empty(),
+            "Pest arrow chained test should pass, got: {diags:?}"
+        );
+    }
+
     // PHP E2E: File-level rules (T004-T008)
     #[test]
     fn e2e_php_t004_violation_detected() {

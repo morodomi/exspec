@@ -636,6 +636,40 @@ mod tests {
         assert!(!fa.has_contract_import);
     }
 
+    // --- FQCN attribute detection ---
+
+    #[test]
+    fn extract_fqcn_attribute_test() {
+        let source = fixture("t001_pass_fqcn_attribute.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_fqcn_attribute.php");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "creates_a_user");
+        assert!(funcs[0].analysis.assertion_count >= 1);
+    }
+
+    // --- Pest arrow function detection ---
+
+    #[test]
+    fn extract_pest_arrow_function() {
+        let source = fixture("t001_pass_pest_arrow.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_pest_arrow.php");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "creates a user");
+        assert!(funcs[0].analysis.assertion_count >= 1);
+    }
+
+    #[test]
+    fn extract_pest_arrow_function_chained() {
+        let source = fixture("t001_pass_pest_arrow_chained.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_pest_arrow_chained.php");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(funcs[0].name, "adds numbers");
+        assert!(funcs[0].analysis.assertion_count >= 1);
+    }
+
     // --- File analysis preserves functions ---
 
     #[test]
