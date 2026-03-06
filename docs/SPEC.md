@@ -5,7 +5,7 @@
 ## Notation
 
 - `BLOCK` / `WARN` / `INFO` / `PASS`: 判定レベル
-- 入力例は Python / TypeScript の両方を記載
+- 入力例は Python / TypeScript を中心に記載（PHP / Rust は Language セクション参照）
 - 閾値はデフォルト値。`.exspec.toml` で変更可能
 
 ---
@@ -667,3 +667,57 @@ test('create user', () => { ... });  // T001 suppressed
 
 - コメントノードから `exspec-ignore:` パターンをパース
 - 次のテスト関数ノードに対してルールを除外
+
+---
+
+## Language: Rust (cargo test)
+
+Phase 5A で追加。tree-sitter-rust 0.23 (ABI 14) による静的解析。
+
+### Test File Detection
+
+| Pattern | Example |
+|---------|---------|
+| `tests/**/*.rs` | `tests/integration_test.rs` |
+| `*_test.rs` | `user_service_test.rs` |
+
+### Known Limitations (MVP)
+
+- `#[cfg(test)] mod tests {}` inline tests in `src/` files are **not** detected (files not recognized as test files by path pattern)
+- Only `tests/` directory and `*_test.rs` pattern files are analyzed
+- Helper modules in `tests/` (e.g., `tests/common/mod.rs`) are scanned but produce no results if they contain no `#[test]` functions
+
+### Test Function Detection
+
+| Pattern | Example |
+|---------|---------|
+| `#[test]` | `#[test] fn test_example() {}` |
+| `#[tokio::test]` | `#[tokio::test] async fn test_async() {}` |
+| `#[async_std::test]` | `#[async_std::test] async fn test_async() {}` |
+
+tree-sitter AST note: `attribute_item` and `function_item` are sibling nodes (not parent-child). Detection uses `attribute_item` capture + `next_sibling()` walk.
+
+### Rule Mapping
+
+| Rule | Rust Pattern | Notes |
+|------|-------------|-------|
+| T001 assertion-free | `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert!` | Macro invocations |
+| T002 mock-overuse | `MockXxx::new()` (mockall crate) | `let mock_xxx = MockXxx::new()` for class names |
+| T003 giant-test | Line count of `fn` body | Same threshold (50 lines) |
+| T004 no-parameterized | `#[rstest]` attribute (rstest crate) | |
+| T005 pbt-missing | `use proptest` / `use quickcheck` | |
+| T006 low-assertion-density | Total assertions / total functions | |
+| T007 test-source-ratio | `.rs` file counts | |
+| T008 no-contract | N/A | Always INFO (no standard Rust validation crate) |
+
+### Inline Suppression
+
+```rust
+// exspec-ignore: T001
+#[test]
+fn test_suppressed() {
+    // T001 suppressed
+}
+```
+
+Comment must be on the line immediately before `#[test]` attribute.

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 4 complete (PHP support + dev-crew integration). Phase 5 (Tier 2 + Rust support) next.
+Phase 5A complete (Rust language support). Phase 5B (Tier 2 rules) next.
 
 ## Progress
 
@@ -19,7 +19,8 @@ Phase 4 complete (PHP support + dev-crew integration). Phase 5 (Tier 2 + Rust su
 | 4 - PHP support (PHPUnit/Pest) + dev-crew integration | DONE |
 | 4.1 - PHP FQCN attribute + Pest arrow function | DONE |
 | 4.2 - Nested class, docblock dedup, FQCN pattern | DONE |
-| 5 - Tier 2 + Rust support | NOT STARTED |
+| 5A - Rust language support (cargo test) | DONE |
+| 5B - Tier 2 rules | NOT STARTED |
 | 6 - Tier 3 (AI Prompt generation) | NOT STARTED |
 | 7 - OSS release + Note article + MCP Server | NOT STARTED |
 
@@ -30,25 +31,26 @@ Phase 4 complete (PHP support + dev-crew integration). Phase 5 (Tier 2 + Rust su
 | Python (pytest) | Yes | Yes | Yes | Yes |
 | TypeScript (Jest/Vitest) | Yes | Yes | Yes | Yes |
 | PHP (PHPUnit/Pest) | Yes | Yes | Yes | Yes |
+| Rust (cargo test) | Yes | Yes | Yes | Yes |
 
 ## Active Rules
 
-| ID | Rule | Level | Python | TypeScript | PHP |
-|----|------|-------|--------|-----------|-----|
-| T001 | assertion-free | BLOCK | Yes | Yes | Yes |
-| T002 | mock-overuse | WARN | Yes | Yes | Yes |
-| T003 | giant-test | WARN | Yes | Yes | Yes |
-| T004 | no-parameterized | INFO | Yes | Yes | Yes |
-| T005 | pbt-missing | INFO | Yes | Yes | N/A |
-| T006 | low-assertion-density | WARN | Yes | Yes | Yes |
-| T007 | test-source-ratio | INFO | -- | -- | -- |
-| T008 | no-contract | INFO | Yes | Yes | Yes |
+| ID | Rule | Level | Python | TypeScript | PHP | Rust |
+|----|------|-------|--------|-----------|-----|------|
+| T001 | assertion-free | BLOCK | Yes | Yes | Yes | Yes |
+| T002 | mock-overuse | WARN | Yes | Yes | Yes | Yes |
+| T003 | giant-test | WARN | Yes | Yes | Yes | Yes |
+| T004 | no-parameterized | INFO | Yes | Yes | Yes | Yes |
+| T005 | pbt-missing | INFO | Yes | Yes | N/A | Yes |
+| T006 | low-assertion-density | WARN | Yes | Yes | Yes | Yes |
+| T007 | test-source-ratio | INFO | -- | -- | -- | -- |
+| T008 | no-contract | INFO | Yes | Yes | Yes | N/A |
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 269 passing | -- |
+| Tests | 309 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 

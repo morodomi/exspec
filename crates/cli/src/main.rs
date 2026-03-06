@@ -9,6 +9,7 @@ use exspec_core::output::{compute_exit_code, format_json, format_sarif, format_t
 use exspec_core::rules::{evaluate_file_rules, evaluate_project_rules, evaluate_rules, Config};
 use exspec_lang_php::PhpExtractor;
 use exspec_lang_python::PythonExtractor;
+use exspec_lang_rust::RustExtractor;
 use exspec_lang_typescript::TypeScriptExtractor;
 use ignore::WalkBuilder;
 
@@ -23,7 +24,7 @@ pub struct Cli {
     #[arg(long, default_value = "terminal")]
     pub format: String,
 
-    /// Language filter (python, typescript, php)
+    /// Language filter (python, typescript, php, rust)
     #[arg(long)]
     pub lang: Option<String>,
 
@@ -76,11 +77,28 @@ fn is_php_source_file(path: &str) -> bool {
     path.ends_with(".php")
 }
 
+fn is_rust_test_file(path: &str) -> bool {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    if !filename.ends_with(".rs") {
+        return false;
+    }
+    // tests/**/*.rs or *_test.rs patterns
+    filename.ends_with("_test.rs") || path.contains("/tests/") || path.contains("\\tests\\")
+}
+
+fn is_rust_source_file(path: &str) -> bool {
+    path.ends_with(".rs")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Language {
     Python,
     TypeScript,
     Php,
+    Rust,
 }
 
 struct DiscoverResult {
@@ -96,6 +114,7 @@ fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
     let include_python = lang.is_none() || lang == Some("python");
     let include_ts = lang.is_none() || lang == Some("typescript");
     let include_php = lang.is_none() || lang == Some("php");
+    let include_rust = lang.is_none() || lang == Some("rust");
 
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -109,6 +128,8 @@ fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
             Some(Language::TypeScript)
         } else if include_php && is_php_test_file(&path) {
             Some(Language::Php)
+        } else if include_rust && is_rust_test_file(&path) {
+            Some(Language::Rust)
         } else {
             None
         };
@@ -118,7 +139,8 @@ fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
         } else {
             let is_source = (include_python && is_python_source_file(&path))
                 || (include_ts && is_typescript_source_file(&path))
-                || (include_php && is_php_source_file(&path));
+                || (include_php && is_php_source_file(&path))
+                || (include_rust && is_rust_source_file(&path));
             if is_source {
                 source_count += 1;
             }
@@ -148,7 +170,7 @@ fn load_config(config_path: &str) -> Config {
     }
 }
 
-const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript", "php"];
+const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript", "php", "rust"];
 const SUPPORTED_FORMATS: &[&str] = &["terminal", "json", "sarif"];
 
 fn validate_format(format: &str) -> Result<(), String> {
@@ -190,6 +212,7 @@ fn main() {
     let py_extractor = PythonExtractor::new();
     let ts_extractor = TypeScriptExtractor::new();
     let php_extractor = PhpExtractor::new();
+    let rust_extractor = RustExtractor::new();
 
     let discovered = discover_files(&cli.path, cli.lang.as_deref());
     let test_file_count: usize = discovered.test_files.values().map(|v| v.len()).sum();
@@ -199,6 +222,7 @@ fn main() {
         (Language::Python, &py_extractor),
         (Language::TypeScript, &ts_extractor),
         (Language::Php, &php_extractor),
+        (Language::Rust, &rust_extractor),
     ];
 
     for (lang_key, extractor) in extractors {
@@ -623,6 +647,32 @@ mod tests {
         evaluate_file_rules(&analyses, config)
     }
 
+    fn analyze_rust_fixtures(files: &[&str]) -> Vec<exspec_core::rules::Diagnostic> {
+        let extractor = RustExtractor::new();
+        let config = Config::default();
+        let mut all_functions = Vec::new();
+        for name in files {
+            let path = fixture_path("rust", name);
+            let source = std::fs::read_to_string(&path).unwrap();
+            all_functions.extend(extractor.extract_test_functions(&source, &path));
+        }
+        evaluate_rules(&all_functions, &config)
+    }
+
+    fn analyze_rust_file_rules(
+        files: &[&str],
+        config: &Config,
+    ) -> Vec<exspec_core::rules::Diagnostic> {
+        let extractor = RustExtractor::new();
+        let mut analyses = Vec::new();
+        for name in files {
+            let path = fixture_path("rust", name);
+            let source = std::fs::read_to_string(&path).unwrap();
+            analyses.push(extractor.extract_file_analysis(&source, &path));
+        }
+        evaluate_file_rules(&analyses, config)
+    }
+
     // Python E2E (T001-T003)
     #[test]
     fn e2e_t001_violation_detected() {
@@ -851,6 +901,121 @@ mod tests {
         );
     }
 
+    // --- Rust E2E (TC-25, TC-26, TC-27) ---
+
+    // TC-25: T001-T003 pass/violation
+    #[test]
+    fn e2e_rust_t001_violation_detected() {
+        let diags = analyze_rust_fixtures(&["t001_violation.rs"]);
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T001"),
+            "expected T001, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t001_pass_no_t001() {
+        let diags = analyze_rust_fixtures(&["t001_pass.rs"]);
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T001"),
+            "expected no T001, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t002_violation_detected() {
+        let diags = analyze_rust_fixtures(&["t002_violation.rs"]);
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T002"),
+            "expected T002, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t002_pass_no_t002() {
+        let diags = analyze_rust_fixtures(&["t002_pass.rs"]);
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T002"),
+            "expected no T002, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t003_violation_detected() {
+        let diags = analyze_rust_fixtures(&["t003_violation.rs"]);
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T003"),
+            "expected T003, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t003_pass_no_t003() {
+        let diags = analyze_rust_fixtures(&["t003_pass.rs"]);
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T003"),
+            "expected no T003, got: {diags:?}"
+        );
+    }
+
+    // TC-26: T004-T006, T008 pass/violation
+    #[test]
+    fn e2e_rust_t004_violation_detected() {
+        let diags = analyze_rust_file_rules(&["t004_violation.rs"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T004"),
+            "expected T004, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t004_pass_no_t004() {
+        let diags = analyze_rust_file_rules(&["t004_pass.rs"], &Config::default());
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T004"),
+            "expected no T004, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t005_violation_detected() {
+        let diags = analyze_rust_file_rules(&["t005_violation.rs"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T005"),
+            "expected T005, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t005_pass_no_t005() {
+        let diags = analyze_rust_file_rules(&["t005_pass.rs"], &Config::default());
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T005"),
+            "expected no T005, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_rust_t008_violation_detected() {
+        let diags = analyze_rust_file_rules(&["t008_violation.rs"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T008"),
+            "expected T008 (always INFO for Rust), got: {diags:?}"
+        );
+    }
+
+    // TC-27: suppression E2E
+    #[test]
+    fn e2e_rust_suppression_hides_t001() {
+        let diags = analyze_rust_fixtures(&["suppressed.rs"]);
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T001"),
+            "T001 should be suppressed, got: {diags:?}"
+        );
+    }
+
+    // TC-23: --lang rust で Rust のみ解析 (validate_lang covered by supported_lang_rust_ok)
+
     // --- E2E: File-level rules (T004-T008) ---
 
     // T004
@@ -1029,9 +1194,9 @@ mod tests {
 
     #[test]
     fn unsupported_lang_returns_error_message() {
-        let result = validate_lang(Some("rust"));
+        let result = validate_lang(Some("cobol"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("rust"));
+        assert!(result.unwrap_err().contains("cobol"));
     }
 
     #[test]
@@ -1060,8 +1225,81 @@ mod tests {
     }
 
     #[test]
+    fn supported_lang_rust_ok() {
+        // TC-24: SUPPORTED_LANGUAGES contains "rust"
+        assert!(validate_lang(Some("rust")).is_ok());
+    }
+
+    #[test]
     fn no_lang_ok() {
         assert!(validate_lang(None).is_ok());
+    }
+
+    // --- Rust file discovery (TC-20, TC-21, TC-22) ---
+
+    #[test]
+    fn is_rust_test_file_matches_tests_dir() {
+        // TC-20: tests/**/*.rs is a Rust test file
+        assert!(is_rust_test_file("tests/integration/foo_test.rs"));
+        assert!(is_rust_test_file("/project/tests/test_something.rs"));
+    }
+
+    #[test]
+    fn is_rust_test_file_matches_test_suffix() {
+        // TC-21: *_test.rs is a Rust test file
+        assert!(is_rust_test_file("foo_test.rs"));
+        assert!(is_rust_test_file("user_service_test.rs"));
+    }
+
+    #[test]
+    fn is_rust_test_file_rejects_src_files() {
+        // TC-22: src/*.rs is NOT a test file
+        assert!(!is_rust_test_file("src/lib.rs"));
+        assert!(!is_rust_test_file("src/main.rs"));
+        assert!(!is_rust_test_file("crates/core/src/rules.rs"));
+    }
+
+    #[test]
+    fn is_rust_test_file_rejects_non_rs() {
+        assert!(!is_rust_test_file("test_foo.py"));
+        assert!(!is_rust_test_file("foo.test.ts"));
+    }
+
+    #[test]
+    fn is_rust_source_file_detects_rs() {
+        assert!(is_rust_source_file("src/lib.rs"));
+        assert!(is_rust_source_file("src/main.rs"));
+        assert!(!is_rust_source_file("foo.py"));
+        assert!(!is_rust_source_file("foo.ts"));
+    }
+
+    // --- Rust discover_files filter (TC-28) ---
+
+    #[test]
+    fn discover_files_finds_rust_test_files() {
+        // TC-28: discover_files with rust filter
+        // tests/ directory files are test files; src/ files are source files
+        let dir =
+            std::env::temp_dir().join(format!("exspec_test_rust_disc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("tests/foo_test.rs"), "").unwrap();
+        std::fs::write(dir.join("tests/integration.rs"), "").unwrap(); // also in tests/ -> test file
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap(); // src/ -> source file
+        std::fs::write(dir.join("test_foo.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), Some("rust"));
+        assert_eq!(
+            get_test_files(&result, Language::Rust).len(),
+            2,
+            "should find 2 rust test files (tests/ dir)"
+        );
+        assert_eq!(
+            get_test_files(&result, Language::Python).len(),
+            0,
+            "rust-only filter should exclude Python files"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
