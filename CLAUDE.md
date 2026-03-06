@@ -147,7 +147,7 @@ ignore = ["node_modules", ".venv", "vendor"]
 |-------|----------|---------|
 | MVP | Python | pytest |
 | MVP | TypeScript | Jest/Vitest |
-| v0.2 | PHP | PHPUnit/Pest |
+| MVP | PHP | PHPUnit/Pest |
 | v0.2 | Rust | cargo test |
 | v1.0 | Dart | flutter_test (best-effort) |
 
@@ -169,24 +169,27 @@ SPEC.md (ルールごとの入力→期待出力)
 | 1 | Rust + tree-sitter scaffolding | cargo build通る (DONE) |
 | 2 | Python + Tier 1 (T001-T003) | 3ルール動作 (DONE) |
 | 3A | TypeScript + inline suppression + output polish | Python+TS両対応 (DONE) |
-| 3B | T004-T008 + .exspec.toml parsing | 残Tier 1ルール |
-| 3C | SARIF出力 + metrics本格化 | MVP完成 |
-| 4 | dev-crew hook統合 | RED Phase自動チェック |
-| 5 | Tier 2 + PHP/Rust対応 | v0.2 |
+| 3B | T004-T008 + .exspec.toml parsing | 残Tier 1ルール (DONE) |
+| 3C | SARIF出力 + metrics本格化 | MVP完成 (DONE) |
+| 4 | dev-crew hook統合 + PHP対応 | quality-gate skill + PHP 3言語対応 (DONE) |
+| 5 | Tier 2 + Rust対応 | v0.2 |
 | 6 | Tier 3 (AI Prompt生成) | v1.0 |
 | 7 | OSS公開 + Note記事 + MCP Server | 公開 |
 
 ## dev-crew Integration
 
+RED Phase Stage 3完了後にquality-gate skillを呼び出し:
+
 ```
 RED Phase → テスト作成完了
-  ├── hook: exspec --format json --strict {test_files}
-  │   ├── exit 0 → GREEN Phase
-  │   └── exit 1 → red-worker にフィードバック
-  └── Tier 3: exspec --format ai-prompt → LLMに渡して意味論的チェック
+  → Quality Gate: quality-gate skill (exspec --format json)
+    ├── exit 0 → Verification Gate → GREEN Phase
+    └── exit 1 → red-workerにフィードバック → 最大2回リトライ
 ```
 
-Hook timing: red-worker完了直後に限定。
+- exspec未インストール時はスキップ（WARNログ）
+- `--strict`は使わない（BLOCKのみexit 1）
+- red-workerは変更なし（exspec呼び出しはオーケストレーター側の責務）
 
 ## Quick Commands
 

@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/lang-python",
     "crates/lang-typescript",
+    "crates/lang-php",
     "crates/cli",
 ]
 resolver = "2"

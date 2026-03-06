@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process;
 
 use clap::Parser;
@@ -6,6 +7,7 @@ use exspec_core::extractor::{FileAnalysis, LanguageExtractor};
 use exspec_core::metrics::compute_metrics;
 use exspec_core::output::{compute_exit_code, format_json, format_sarif, format_terminal};
 use exspec_core::rules::{evaluate_file_rules, evaluate_project_rules, evaluate_rules, Config};
+use exspec_lang_php::PhpExtractor;
 use exspec_lang_python::PythonExtractor;
 use exspec_lang_typescript::TypeScriptExtractor;
 use ignore::WalkBuilder;
@@ -21,7 +23,7 @@ pub struct Cli {
     #[arg(long, default_value = "terminal")]
     pub format: String,
 
-    /// Language filter (python, typescript)
+    /// Language filter (python, typescript, php)
     #[arg(long)]
     pub lang: Option<String>,
 
@@ -61,59 +63,76 @@ fn is_typescript_source_file(path: &str) -> bool {
     path.ends_with(".ts") || path.ends_with(".tsx")
 }
 
+fn is_php_test_file(path: &str) -> bool {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+    filename.ends_with(".php")
+        && (filename.ends_with("Test.php") || filename.ends_with("_test.php"))
+}
+
+fn is_php_source_file(path: &str) -> bool {
+    path.ends_with(".php")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Language {
+    Python,
+    TypeScript,
+    Php,
+}
+
 struct DiscoverResult {
-    python_test_files: Vec<String>,
-    ts_test_files: Vec<String>,
+    test_files: HashMap<Language, Vec<String>>,
     source_file_count: usize,
 }
 
 fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
-    let mut python_files = Vec::new();
-    let mut ts_files = Vec::new();
+    let mut test_files: HashMap<Language, Vec<String>> = HashMap::new();
     let mut source_count = 0;
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
 
     let include_python = lang.is_none() || lang == Some("python");
     let include_ts = lang.is_none() || lang == Some("typescript");
+    let include_php = lang.is_none() || lang == Some("php");
 
     for entry in walker.flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let path = entry.path().to_string_lossy().to_string();
-        let is_py_test = include_python && is_python_test_file(&path);
-        let is_ts_test = include_ts && is_typescript_test_file(&path);
 
-        if is_py_test {
-            python_files.push(path);
-        } else if is_ts_test {
-            ts_files.push(path);
+        let detected_test = if include_python && is_python_test_file(&path) {
+            Some(Language::Python)
+        } else if include_ts && is_typescript_test_file(&path) {
+            Some(Language::TypeScript)
+        } else if include_php && is_php_test_file(&path) {
+            Some(Language::Php)
+        } else {
+            None
+        };
+
+        if let Some(lang_key) = detected_test {
+            test_files.entry(lang_key).or_default().push(path);
         } else {
             let is_source = (include_python && is_python_source_file(&path))
-                || (include_ts && is_typescript_source_file(&path));
+                || (include_ts && is_typescript_source_file(&path))
+                || (include_php && is_php_source_file(&path));
             if is_source {
                 source_count += 1;
             }
         }
     }
-    python_files.sort();
-    ts_files.sort();
+
+    for files in test_files.values_mut() {
+        files.sort();
+    }
+
     DiscoverResult {
-        python_test_files: python_files,
-        ts_test_files: ts_files,
+        test_files,
         source_file_count: source_count,
     }
-}
-
-#[cfg(test)]
-fn discover_test_files(root: &str, lang: Option<&str>) -> (Vec<String>, Vec<String>) {
-    let result = discover_files(root, lang);
-    (result.python_test_files, result.ts_test_files)
-}
-
-#[cfg(test)]
-fn count_source_files(root: &str, lang: Option<&str>) -> usize {
-    discover_files(root, lang).source_file_count
 }
 
 fn load_config(config_path: &str) -> Config {
@@ -129,7 +148,7 @@ fn load_config(config_path: &str) -> Config {
     }
 }
 
-const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript"];
+const SUPPORTED_LANGUAGES: &[&str] = &["python", "typescript", "php"];
 const SUPPORTED_FORMATS: &[&str] = &["terminal", "json", "sarif"];
 
 fn validate_format(format: &str) -> Result<(), String> {
@@ -170,33 +189,31 @@ fn main() {
     let config = load_config(&cli.config);
     let py_extractor = PythonExtractor::new();
     let ts_extractor = TypeScriptExtractor::new();
+    let php_extractor = PhpExtractor::new();
 
     let discovered = discover_files(&cli.path, cli.lang.as_deref());
-    let python_files = &discovered.python_test_files;
-    let ts_files = &discovered.ts_test_files;
-    let test_file_count = python_files.len() + ts_files.len();
+    let test_file_count: usize = discovered.test_files.values().map(|v| v.len()).sum();
     let mut all_analyses: Vec<FileAnalysis> = Vec::new();
 
-    for file_path in python_files {
-        let source = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("warning: cannot read {file_path}: {e}");
-                continue;
-            }
-        };
-        all_analyses.push(py_extractor.extract_file_analysis(&source, file_path));
-    }
+    let extractors: &[(Language, &dyn LanguageExtractor)] = &[
+        (Language::Python, &py_extractor),
+        (Language::TypeScript, &ts_extractor),
+        (Language::Php, &php_extractor),
+    ];
 
-    for file_path in ts_files {
-        let source = match std::fs::read_to_string(file_path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("warning: cannot read {file_path}: {e}");
-                continue;
+    for (lang_key, extractor) in extractors {
+        if let Some(files) = discovered.test_files.get(lang_key) {
+            for file_path in files {
+                let source = match std::fs::read_to_string(file_path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("warning: cannot read {file_path}: {e}");
+                        continue;
+                    }
+                };
+                all_analyses.push(extractor.extract_file_analysis(&source, file_path));
             }
-        };
-        all_analyses.push(ts_extractor.extract_file_analysis(&source, file_path));
+        }
     }
 
     // Collect all functions for per-function rules (T001-T003)
@@ -326,6 +343,22 @@ mod tests {
         assert!(!is_typescript_test_file("test.js"));
     }
 
+    // --- PHP file discovery ---
+
+    #[test]
+    fn is_php_test_file_matches_test_suffix() {
+        assert!(is_php_test_file("UserTest.php"));
+        assert!(is_php_test_file("tests/UserTest.php"));
+        assert!(is_php_test_file("user_test.php"));
+    }
+
+    #[test]
+    fn is_php_test_file_rejects_non_test() {
+        assert!(!is_php_test_file("User.php"));
+        assert!(!is_php_test_file("helper.php"));
+        assert!(!is_php_test_file("UserTest.py"));
+    }
+
     // --- Source file detection ---
 
     #[test]
@@ -341,7 +374,17 @@ mod tests {
         assert!(!is_typescript_source_file("foo.py"));
     }
 
+    #[test]
+    fn is_php_source_file_detects_php() {
+        assert!(is_php_source_file("User.php"));
+        assert!(!is_php_source_file("foo.py"));
+    }
+
     // --- Multi-language discovery ---
+
+    fn get_test_files(result: &DiscoverResult, lang: Language) -> &[String] {
+        result.test_files.get(&lang).map_or(&[], |v| v.as_slice())
+    }
 
     #[test]
     fn discover_test_files_finds_test_pattern() {
@@ -352,9 +395,9 @@ mod tests {
         std::fs::write(dir.join("bar_test.py"), "").unwrap();
         std::fs::write(dir.join("helper.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let (py, ts) = discover_test_files(dir.to_str().unwrap(), None);
-        assert_eq!(py.len(), 2);
-        assert_eq!(ts.len(), 1);
+        let result = discover_files(dir.to_str().unwrap(), None);
+        assert_eq!(get_test_files(&result, Language::Python).len(), 2);
+        assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -365,9 +408,9 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let (py, ts) = discover_test_files(dir.to_str().unwrap(), Some("python"));
-        assert_eq!(py.len(), 1);
-        assert_eq!(ts.len(), 0);
+        let result = discover_files(dir.to_str().unwrap(), Some("python"));
+        assert_eq!(get_test_files(&result, Language::Python).len(), 1);
+        assert_eq!(get_test_files(&result, Language::TypeScript).len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -378,15 +421,29 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let (py, ts) = discover_test_files(dir.to_str().unwrap(), Some("typescript"));
-        assert_eq!(py.len(), 0);
-        assert_eq!(ts.len(), 1);
+        let result = discover_files(dir.to_str().unwrap(), Some("typescript"));
+        assert_eq!(get_test_files(&result, Language::Python).len(), 0);
+        assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_test_files_lang_filter_php() {
+        let dir = std::env::temp_dir().join(format!("exspec_test_lang_php_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test_foo.py"), "").unwrap();
+        std::fs::write(dir.join("UserTest.php"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), Some("php"));
+        assert_eq!(get_test_files(&result, Language::Python).len(), 0);
+        assert_eq!(get_test_files(&result, Language::Php).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn discover_test_files_ignores_venv() {
-        let (py, _) = discover_test_files(".", None);
+        let result = discover_files(".", None);
+        let py = get_test_files(&result, Language::Python);
         assert!(py.iter().all(|f| !f.contains(".venv")));
     }
 
@@ -402,8 +459,8 @@ mod tests {
         std::fs::write(dir.join("test_app.py"), "").unwrap();
         std::fs::write(dir.join("utils.ts"), "").unwrap();
         std::fs::write(dir.join("utils.test.ts"), "").unwrap();
-        let count = count_source_files(dir.to_str().unwrap(), None);
-        assert_eq!(count, 2); // app.py + utils.ts (test files excluded)
+        let result = discover_files(dir.to_str().unwrap(), None);
+        assert_eq!(result.source_file_count, 2); // app.py + utils.ts (test files excluded)
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -419,8 +476,8 @@ mod tests {
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
         std::fs::write(dir.join("utils.ts"), "").unwrap();
         let result = discover_files(dir.to_str().unwrap(), None);
-        assert_eq!(result.python_test_files.len(), 1);
-        assert_eq!(result.ts_test_files.len(), 1);
+        assert_eq!(get_test_files(&result, Language::Python).len(), 1);
+        assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
         assert_eq!(result.source_file_count, 2); // app.py + utils.ts
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -434,9 +491,26 @@ mod tests {
         std::fs::create_dir_all(dir.join(".hidden")).unwrap();
         std::fs::write(dir.join(".hidden/test_foo.py"), "").unwrap();
         std::fs::write(dir.join("test_visible.py"), "").unwrap();
-        let (py, _) = discover_test_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None);
+        let py = get_test_files(&result, Language::Python);
         assert_eq!(py.len(), 1, "should only find visible file: {py:?}");
         assert!(py[0].contains("test_visible.py"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- PHP file discovery in combined walk ---
+
+    #[test]
+    fn discover_files_finds_php_test_files() {
+        let dir = std::env::temp_dir().join(format!("exspec_test_php_disc_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("UserTest.php"), "").unwrap();
+        std::fs::write(dir.join("User.php"), "").unwrap();
+        std::fs::write(dir.join("test_foo.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), None);
+        assert_eq!(get_test_files(&result, Language::Php).len(), 1);
+        assert_eq!(result.source_file_count, 1); // User.php
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -523,6 +597,32 @@ mod tests {
         evaluate_file_rules(&analyses, config)
     }
 
+    fn analyze_php_fixtures(files: &[&str]) -> Vec<exspec_core::rules::Diagnostic> {
+        let extractor = PhpExtractor::new();
+        let config = Config::default();
+        let mut all_functions = Vec::new();
+        for name in files {
+            let path = fixture_path("php", name);
+            let source = std::fs::read_to_string(&path).unwrap();
+            all_functions.extend(extractor.extract_test_functions(&source, &path));
+        }
+        evaluate_rules(&all_functions, &config)
+    }
+
+    fn analyze_php_file_rules(
+        files: &[&str],
+        config: &Config,
+    ) -> Vec<exspec_core::rules::Diagnostic> {
+        let extractor = PhpExtractor::new();
+        let mut analyses = Vec::new();
+        for name in files {
+            let path = fixture_path("php", name);
+            let source = std::fs::read_to_string(&path).unwrap();
+            analyses.push(extractor.extract_file_analysis(&source, &path));
+        }
+        evaluate_file_rules(&analyses, config)
+    }
+
     // Python E2E (T001-T003)
     #[test]
     fn e2e_t001_violation_detected() {
@@ -593,6 +693,106 @@ mod tests {
         assert!(
             !diags.iter().any(|d| d.rule.0 == "T002"),
             "T002 should be suppressed"
+        );
+    }
+
+    // PHP E2E (T001-T003)
+    #[test]
+    fn e2e_php_t001_violation_detected() {
+        let diags = analyze_php_fixtures(&["t001_violation.php"]);
+        assert!(diags.iter().any(|d| d.rule.0 == "T001"));
+    }
+
+    #[test]
+    fn e2e_php_t002_violation_detected() {
+        let diags = analyze_php_fixtures(&["t002_violation.php"]);
+        assert!(diags.iter().any(|d| d.rule.0 == "T002"));
+    }
+
+    #[test]
+    fn e2e_php_t003_violation_detected() {
+        let diags = analyze_php_fixtures(&["t003_violation.php"]);
+        assert!(diags.iter().any(|d| d.rule.0 == "T003"));
+    }
+
+    #[test]
+    fn e2e_php_pass_files_no_diagnostics() {
+        let diags = analyze_php_fixtures(&["t001_pass.php", "t002_pass.php", "t003_pass.php"]);
+        assert!(diags.is_empty(), "expected no diagnostics, got: {diags:?}");
+    }
+
+    // PHP Suppression E2E
+    #[test]
+    fn e2e_php_suppression_hides_t002() {
+        let diags = analyze_php_fixtures(&["suppressed.php"]);
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T002"),
+            "T002 should be suppressed"
+        );
+    }
+
+    // PHP E2E: File-level rules (T004-T008)
+    #[test]
+    fn e2e_php_t004_violation_detected() {
+        let diags = analyze_php_file_rules(&["t004_violation.php"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T004"),
+            "expected T004, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t004_pass_no_t004() {
+        let diags = analyze_php_file_rules(&["t004_pass.php"], &Config::default());
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T004"),
+            "expected no T004, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t005_violation_detected() {
+        // PHP PBT is not mature, so T005 always triggers
+        let diags = analyze_php_file_rules(&["t005_violation.php"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T005"),
+            "expected T005, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t006_violation_detected() {
+        let diags = analyze_php_file_rules(&["t006_violation.php"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T006"),
+            "expected T006, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t006_pass_no_t006() {
+        let diags = analyze_php_file_rules(&["t006_pass.php"], &Config::default());
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T006"),
+            "expected no T006, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t008_violation_detected() {
+        let diags = analyze_php_file_rules(&["t008_violation.php"], &Config::default());
+        assert!(
+            diags.iter().any(|d| d.rule.0 == "T008"),
+            "expected T008, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn e2e_php_t008_pass_no_t008() {
+        let diags = analyze_php_file_rules(&["t008_pass.php"], &Config::default());
+        assert!(
+            !diags.iter().any(|d| d.rule.0 == "T008"),
+            "expected no T008, got: {diags:?}"
         );
     }
 
@@ -797,6 +997,11 @@ mod tests {
     #[test]
     fn supported_lang_typescript_ok() {
         assert!(validate_lang(Some("typescript")).is_ok());
+    }
+
+    #[test]
+    fn supported_lang_php_ok() {
+        assert!(validate_lang(Some("php")).is_ok());
     }
 
     #[test]

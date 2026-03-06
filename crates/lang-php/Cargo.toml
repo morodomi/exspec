@@ -1,0 +1,10 @@
+[package]
+name = "exspec-lang-php"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+exspec-core = { path = "../core" }
+tree-sitter = "0.24"
+tree-sitter-php = "0.23"
+streaming-iterator = "0.1"

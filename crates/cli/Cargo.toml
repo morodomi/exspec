@@ -11,6 +11,7 @@ path = "src/main.rs"
 exspec-core = { path = "../core" }
 exspec-lang-python = { path = "../lang-python" }
 exspec-lang-typescript = { path = "../lang-typescript" }
+exspec-lang-php = { path = "../lang-php" }
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
 toml = "0.8"
