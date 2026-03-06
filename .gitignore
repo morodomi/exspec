@@ -22,3 +22,7 @@ lcov.info
 # Build artifacts
 *.d
 *.o
+
+# Claude Code
+.claude/agent-memory/
+.claude/settings.local.json
