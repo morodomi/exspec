@@ -52,7 +52,7 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl imp
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 386 passing | -- |
+| Tests | 388 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -67,4 +67,4 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl imp
 
 ## Open Issues
 
-None. All issues resolved as of Phase 4.2 cleanup.
+None. All issues resolved as of T102 implementation.

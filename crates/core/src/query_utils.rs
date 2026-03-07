@@ -7,9 +7,10 @@ use crate::rules::RuleId;
 use crate::suppress::parse_suppression;
 
 pub fn count_captures(query: &Query, capture_name: &str, node: Node, source: &[u8]) -> usize {
-    let idx = query
-        .capture_index_for_name(capture_name)
-        .expect("capture not found");
+    let idx = match query.capture_index_for_name(capture_name) {
+        Some(i) => i,
+        None => return 0,
+    };
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, node, source);
     let mut count = 0;
@@ -43,9 +44,10 @@ pub fn collect_mock_class_names<F>(
 where
     F: Fn(&str) -> String,
 {
-    let var_idx = query
-        .capture_index_for_name("var_name")
-        .expect("no @var_name capture");
+    let var_idx = match query.capture_index_for_name("var_name") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, node, source);
     let mut names = BTreeSet::new();
@@ -245,6 +247,39 @@ mod tests {
             source.as_bytes(),
         );
         assert_eq!(count, 0, "no assertions, should return 0");
+    }
+
+    #[test]
+    fn count_captures_missing_capture_returns_zero() {
+        let lang = python_language();
+        // Query with capture @assertion, but we ask for nonexistent name
+        let query = Query::new(&lang, "(assert_statement) @assertion").unwrap();
+        let source = "def test_foo():\n    assert True\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let count = count_captures(&query, "nonexistent", root, source.as_bytes());
+        assert_eq!(count, 0, "missing capture name should return 0, not panic");
+    }
+
+    #[test]
+    fn collect_mock_class_names_missing_capture_returns_empty() {
+        let lang = python_language();
+        // Query without @var_name capture
+        let query = Query::new(&lang, "(assert_statement) @assertion").unwrap();
+        let source = "def test_foo():\n    assert True\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&lang).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let names = collect_mock_class_names(&query, root, source.as_bytes(), |s| s.to_string());
+        assert!(
+            names.is_empty(),
+            "missing @var_name capture should return empty vec, not panic"
+        );
     }
 
     #[test]
