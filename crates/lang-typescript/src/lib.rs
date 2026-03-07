@@ -17,6 +17,7 @@ const IMPORT_PBT_QUERY: &str = include_str!("../queries/import_pbt.scm");
 const IMPORT_CONTRACT_QUERY: &str = include_str!("../queries/import_contract.scm");
 const HOW_NOT_WHAT_QUERY: &str = include_str!("../queries/how_not_what.scm");
 const PRIVATE_IN_ASSERTION_QUERY: &str = include_str!("../queries/private_in_assertion.scm");
+const ERROR_TEST_QUERY: &str = include_str!("../queries/error_test.scm");
 
 fn ts_language() -> tree_sitter::Language {
     tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
@@ -35,6 +36,7 @@ static IMPORT_PBT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static IMPORT_CONTRACT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static HOW_NOT_WHAT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static PRIVATE_IN_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+static ERROR_TEST_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
 pub struct TypeScriptExtractor;
 
@@ -267,6 +269,7 @@ impl LanguageExtractor for TypeScriptExtractor {
                     functions: Vec::new(),
                     has_pbt_import: false,
                     has_contract_import: false,
+                    has_error_test: false,
                     parameterized_count: 0,
                 };
             }
@@ -287,11 +290,15 @@ impl LanguageExtractor for TypeScriptExtractor {
         let has_contract_import =
             has_any_match(contract_query, "contract_import", root, source_bytes);
 
+        let error_test_query = cached_query(&ERROR_TEST_QUERY_CACHE, ERROR_TEST_QUERY);
+        let has_error_test = has_any_match(error_test_query, "error_test", root, source_bytes);
+
         FileAnalysis {
             file: file_path.to_string(),
             functions,
             has_pbt_import,
             has_contract_import,
+            has_error_test,
             parameterized_count,
         }
     }
@@ -833,6 +840,55 @@ mod tests {
         assert!(
             q.capture_index_for_name("private_access").is_some(),
             "private_in_assertion.scm must define @private_access capture"
+        );
+    }
+
+    // --- T103: missing-error-test ---
+
+    #[test]
+    fn error_test_to_throw() {
+        let source = fixture("t103_pass_toThrow.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_toThrow.test.ts");
+        assert!(fa.has_error_test, ".toThrow() should set has_error_test");
+    }
+
+    #[test]
+    fn error_test_to_throw_error() {
+        let source = fixture("t103_pass_toThrowError.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_toThrowError.test.ts");
+        assert!(
+            fa.has_error_test,
+            ".toThrowError() should set has_error_test"
+        );
+    }
+
+    #[test]
+    fn error_test_rejects() {
+        let source = fixture("t103_pass_rejects.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_rejects.test.ts");
+        assert!(fa.has_error_test, ".rejects should set has_error_test");
+    }
+
+    #[test]
+    fn error_test_no_patterns() {
+        let source = fixture("t103_violation.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_violation.test.ts");
+        assert!(
+            !fa.has_error_test,
+            "no error patterns should set has_error_test=false"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_error_test() {
+        let q = make_query(include_str!("../queries/error_test.scm"));
+        assert!(
+            q.capture_index_for_name("error_test").is_some(),
+            "error_test.scm must define @error_test capture"
         );
     }
 }

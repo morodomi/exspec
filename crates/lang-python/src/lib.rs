@@ -17,6 +17,7 @@ const IMPORT_PBT_QUERY: &str = include_str!("../queries/import_pbt.scm");
 const IMPORT_CONTRACT_QUERY: &str = include_str!("../queries/import_contract.scm");
 const HOW_NOT_WHAT_QUERY: &str = include_str!("../queries/how_not_what.scm");
 const PRIVATE_IN_ASSERTION_QUERY: &str = include_str!("../queries/private_in_assertion.scm");
+const ERROR_TEST_QUERY: &str = include_str!("../queries/error_test.scm");
 
 fn python_language() -> tree_sitter::Language {
     tree_sitter_python::LANGUAGE.into()
@@ -35,6 +36,7 @@ static IMPORT_PBT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static IMPORT_CONTRACT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static HOW_NOT_WHAT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static PRIVATE_IN_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+static ERROR_TEST_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
 pub struct PythonExtractor;
 
@@ -266,6 +268,7 @@ impl LanguageExtractor for PythonExtractor {
                     functions: Vec::new(),
                     has_pbt_import: false,
                     has_contract_import: false,
+                    has_error_test: false,
                     parameterized_count: 0,
                 };
             }
@@ -286,11 +289,15 @@ impl LanguageExtractor for PythonExtractor {
         let has_contract_import =
             has_any_match(contract_query, "contract_import", root, source_bytes);
 
+        let error_test_query = cached_query(&ERROR_TEST_QUERY_CACHE, ERROR_TEST_QUERY);
+        let has_error_test = has_any_match(error_test_query, "error_test", root, source_bytes);
+
         FileAnalysis {
             file: file_path.to_string(),
             functions,
             has_pbt_import,
             has_contract_import,
+            has_error_test,
             parameterized_count,
         }
     }
@@ -921,6 +928,80 @@ mod tests {
         assert!(
             q.capture_index_for_name("private_access").is_some(),
             "private_in_assertion.scm must define @private_access capture"
+        );
+    }
+
+    // --- T103: missing-error-test ---
+
+    #[test]
+    fn error_test_pytest_raises() {
+        let source = fixture("t103_pass_pytest_raises.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_pytest_raises.py");
+        assert!(fa.has_error_test, "pytest.raises should set has_error_test");
+    }
+
+    #[test]
+    fn error_test_assert_raises() {
+        let source = fixture("t103_pass_assertRaises.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_assertRaises.py");
+        assert!(
+            fa.has_error_test,
+            "self.assertRaises should set has_error_test"
+        );
+    }
+
+    #[test]
+    fn error_test_assert_raises_regex() {
+        let source = fixture("t103_pass_assertRaisesRegex.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_assertRaisesRegex.py");
+        assert!(
+            fa.has_error_test,
+            "self.assertRaisesRegex should set has_error_test"
+        );
+    }
+
+    #[test]
+    fn error_test_assert_warns() {
+        let source = fixture("t103_pass_assertWarns.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_assertWarns.py");
+        assert!(
+            fa.has_error_test,
+            "self.assertWarns should set has_error_test"
+        );
+    }
+
+    #[test]
+    fn error_test_assert_warns_regex() {
+        let source = fixture("t103_pass_assertWarnsRegex.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_pass_assertWarnsRegex.py");
+        assert!(
+            fa.has_error_test,
+            "self.assertWarnsRegex should set has_error_test"
+        );
+    }
+
+    #[test]
+    fn error_test_no_patterns() {
+        let source = fixture("t103_violation.py");
+        let extractor = PythonExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_violation.py");
+        assert!(
+            !fa.has_error_test,
+            "no error patterns should set has_error_test=false"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_error_test() {
+        let q = make_query(include_str!("../queries/error_test.scm"));
+        assert!(
+            q.capture_index_for_name("error_test").is_some(),
+            "error_test.scm must define @error_test capture"
         );
     }
 }

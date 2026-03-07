@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl implemented for Python + TypeScript.
+Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl + T103 missing-error-test implemented for Python + TypeScript.
 
 ## Progress
 
@@ -47,12 +47,13 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl imp
 | T008 | no-contract | INFO | Yes | Yes | Yes | N/A |
 | T101 | how-not-what | WARN | Yes | Yes | -- | -- |
 | T102 | fixture-sprawl | WARN | Yes | Yes | -- | -- |
+| T103 | missing-error-test | INFO | Yes | Yes | -- | -- |
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 388 passing | -- |
+| Tests | 404 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -67,4 +68,4 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl imp
 
 ## Open Issues
 
-None. All issues resolved as of T102 implementation.
+- [#15](https://github.com/morodomi/exspec/issues/15): T103 error_test.scm pattern precision (Python self. + TypeScript expect chain)

@@ -120,6 +120,7 @@ mod tests {
             functions,
             has_pbt_import: has_pbt,
             has_contract_import: has_contract,
+            has_error_test: false,
             parameterized_count: parameterized,
         }
     }

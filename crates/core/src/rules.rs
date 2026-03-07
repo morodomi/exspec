@@ -284,6 +284,18 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
                 details: None,
             });
         }
+
+        // T103: missing-error-test
+        if !is_disabled(config, "T103") && !analysis.has_error_test {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T103"),
+                severity: Severity::Info,
+                file: analysis.file.clone(),
+                line: None,
+                message: "missing-error-test: no error/exception test found in file".to_string(),
+                details: None,
+            });
+        }
     }
 
     diagnostics
@@ -730,11 +742,30 @@ mod tests {
         has_contract_import: bool,
         parameterized_count: usize,
     ) -> FileAnalysis {
+        make_file_analysis_full(
+            file,
+            functions,
+            has_pbt_import,
+            has_contract_import,
+            false,
+            parameterized_count,
+        )
+    }
+
+    fn make_file_analysis_full(
+        file: &str,
+        functions: Vec<TestFunction>,
+        has_pbt_import: bool,
+        has_contract_import: bool,
+        has_error_test: bool,
+        parameterized_count: usize,
+    ) -> FileAnalysis {
         FileAnalysis {
             file: file.to_string(),
             functions,
             has_pbt_import,
             has_contract_import,
+            has_error_test,
             parameterized_count,
         }
     }
@@ -999,6 +1030,65 @@ mod tests {
         let analyses = vec![make_file_analysis("test.py", vec![], false, false, 0)];
         let diags = evaluate_file_rules(&analyses, &Config::default());
         assert!(!diags.iter().any(|d| d.rule.0 == "T008"));
+    }
+
+    // --- T103: missing-error-test ---
+
+    #[test]
+    fn t103_no_error_test_produces_info() {
+        let funcs = vec![make_func(
+            "test_a",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let analyses = vec![make_file_analysis("test.py", funcs, false, false, 0)];
+        let diags = evaluate_file_rules(&analyses, &Config::default());
+        assert!(diags.iter().any(|d| d.rule.0 == "T103"));
+        let t103 = diags.iter().find(|d| d.rule.0 == "T103").unwrap();
+        assert_eq!(t103.severity, Severity::Info);
+    }
+
+    #[test]
+    fn t103_has_error_test_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_a",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let analyses = vec![make_file_analysis_full(
+            "test.py", funcs, false, false, true, 0,
+        )];
+        let diags = evaluate_file_rules(&analyses, &Config::default());
+        assert!(!diags.iter().any(|d| d.rule.0 == "T103"));
+    }
+
+    #[test]
+    fn t103_empty_file_no_diagnostic() {
+        let analyses = vec![make_file_analysis("test.py", vec![], false, false, 0)];
+        let diags = evaluate_file_rules(&analyses, &Config::default());
+        assert!(!diags.iter().any(|d| d.rule.0 == "T103"));
+    }
+
+    #[test]
+    fn t103_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_a",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let analyses = vec![make_file_analysis("test.py", funcs, false, false, 0)];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T103")],
+            ..Config::default()
+        };
+        let diags = evaluate_file_rules(&analyses, &config);
+        assert!(!diags.iter().any(|d| d.rule.0 == "T103"));
     }
 
     // === Project-level rules ===

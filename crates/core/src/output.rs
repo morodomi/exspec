@@ -207,6 +207,11 @@ const RULE_REGISTRY: &[RuleMeta] = &[
         name: "fixture-sprawl",
         short_description: "Test depends on too many fixtures",
     },
+    RuleMeta {
+        id: "T103",
+        name: "missing-error-test",
+        short_description: "No error/exception test found in file",
+    },
 ];
 
 pub fn format_sarif(diagnostics: &[Diagnostic]) -> String {
@@ -638,13 +643,13 @@ mod tests {
     }
 
     #[test]
-    fn sarif_rules_has_10_entries() {
+    fn sarif_rules_has_11_entries() {
         let output = format_sarif(&[]);
         let parsed = parse_sarif(&output);
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
-        assert_eq!(rules.len(), 10);
+        assert_eq!(rules.len(), 11);
     }
 
     #[test]
@@ -703,7 +708,7 @@ mod tests {
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
-        assert_eq!(rules.len(), 10);
+        assert_eq!(rules.len(), 11);
     }
 
     #[test]

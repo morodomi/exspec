@@ -270,6 +270,8 @@ impl LanguageExtractor for PhpExtractor {
                     functions: Vec::new(),
                     has_pbt_import: false,
                     has_contract_import: false,
+                    // T103 deferred for PHP: true to suppress noise
+                    has_error_test: true,
                     parameterized_count: 0,
                 };
             }
@@ -295,6 +297,8 @@ impl LanguageExtractor for PhpExtractor {
             functions,
             has_pbt_import,
             has_contract_import,
+            // T103 deferred for PHP: true to suppress noise
+            has_error_test: true,
             parameterized_count,
         }
     }

@@ -23,7 +23,8 @@ pub struct TestFunction {
 /// File-level analysis result for rules that operate at file scope (T004-T008).
 ///
 /// Language extractors MUST override `extract_file_analysis()` to provide
-/// accurate `has_pbt_import`, `has_contract_import`, and `parameterized_count`.
+/// accurate `has_pbt_import`, `has_contract_import`, `has_error_test`,
+/// and `parameterized_count`.
 /// The default impl returns false/0 for these fields.
 #[derive(Debug, Clone)]
 pub struct FileAnalysis {
@@ -31,6 +32,7 @@ pub struct FileAnalysis {
     pub functions: Vec<TestFunction>,
     pub has_pbt_import: bool,
     pub has_contract_import: bool,
+    pub has_error_test: bool,
     pub parameterized_count: usize,
 }
 
@@ -47,6 +49,7 @@ pub trait LanguageExtractor {
             functions,
             has_pbt_import: false,
             has_contract_import: false,
+            has_error_test: false,
             parameterized_count: 0,
         }
     }
@@ -75,12 +78,14 @@ mod tests {
             functions: vec![],
             has_pbt_import: true,
             has_contract_import: false,
+            has_error_test: true,
             parameterized_count: 3,
         };
         assert_eq!(fa.file, "test.py");
         assert!(fa.functions.is_empty());
         assert!(fa.has_pbt_import);
         assert!(!fa.has_contract_import);
+        assert!(fa.has_error_test);
         assert_eq!(fa.parameterized_count, 3);
     }
 
@@ -104,6 +109,7 @@ mod tests {
         assert_eq!(fa.functions.len(), 1);
         assert!(!fa.has_pbt_import);
         assert!(!fa.has_contract_import);
+        assert!(!fa.has_error_test);
         assert_eq!(fa.parameterized_count, 0);
     }
 }
