@@ -220,6 +220,9 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
             source_bytes,
         );
 
+        // Fixture count: number of function parameters (excluding `self`)
+        let fixture_count = count_function_params(fn_node, source_bytes);
+
         let suppress_row = tm.decorated_start_row.unwrap_or(tm.fn_start_row);
         let suppressed_rules = extract_suppression_from_previous_line(source, suppress_row);
 
@@ -234,6 +237,7 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                 mock_classes,
                 line_count,
                 how_not_what_count: how_not_what_count + private_in_assertion_count,
+                fixture_count,
                 suppressed_rules,
             },
         });
@@ -290,6 +294,39 @@ impl LanguageExtractor for PythonExtractor {
             parameterized_count,
         }
     }
+}
+
+/// Count function parameters excluding `self`.
+/// Uses tree-sitter Node API: function_definition → parameters → named_child_count.
+/// Only named children are actual parameters (commas and parens are anonymous).
+fn count_function_params(fn_node: Node, source: &[u8]) -> usize {
+    // Navigate up to the function_definition node if we're inside it
+    let mut node = fn_node;
+    while node.kind() != "function_definition" {
+        match node.parent() {
+            Some(p) => node = p,
+            None => return 0,
+        }
+    }
+    let params = match node.child_by_field_name("parameters") {
+        Some(p) => p,
+        None => return 0,
+    };
+    let count = params.named_child_count();
+    if count == 0 {
+        return 0;
+    }
+    // Check if first named child is `self` or `cls` (classmethod)
+    if let Some(first) = params.named_child(0) {
+        if first
+            .utf8_text(source)
+            .map(|s| s == "self" || s == "cls")
+            .unwrap_or(false)
+        {
+            return count - 1;
+        }
+    }
+    count
 }
 
 fn extract_mock_class_name(var_name: &str) -> String {
@@ -757,6 +794,56 @@ mod tests {
         assert!(
             q.capture_index_for_name("how_pattern").is_some(),
             "how_not_what.scm must define @how_pattern capture"
+        );
+    }
+
+    // --- T102: fixture-sprawl ---
+
+    #[test]
+    fn fixture_count_for_violation() {
+        let source = fixture("t102_violation.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_violation.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 7,
+            "expected 7 parameters as fixture_count"
+        );
+    }
+
+    #[test]
+    fn fixture_count_for_pass() {
+        let source = fixture("t102_pass.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_pass.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 2,
+            "expected 2 parameters as fixture_count"
+        );
+    }
+
+    #[test]
+    fn fixture_count_self_excluded() {
+        let source = fixture("t102_self_excluded.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_self_excluded.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 2,
+            "self should be excluded from fixture_count"
+        );
+    }
+
+    #[test]
+    fn fixture_count_cls_excluded() {
+        let source = fixture("t102_cls_excluded.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_cls_excluded.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 2,
+            "cls should be excluded from fixture_count"
         );
     }
 

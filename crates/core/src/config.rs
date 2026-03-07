@@ -32,6 +32,7 @@ pub struct ThresholdsConfig {
     pub mock_class_max: Option<usize>,
     pub test_max_lines: Option<usize>,
     pub parameterized_min_ratio: Option<f64>,
+    pub fixture_max: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -67,6 +68,7 @@ impl From<ExspecConfig> for Config {
                 .filter(|v| v.is_finite())
                 .unwrap_or(defaults.parameterized_min_ratio)
                 .clamp(0.0, 1.0),
+            fixture_max: ec.thresholds.fixture_max.unwrap_or(defaults.fixture_max),
             disabled_rules: ec.rules.disable.iter().map(|s| RuleId::new(s)).collect(),
         }
     }
@@ -95,6 +97,7 @@ mod tests {
         assert_eq!(ec.thresholds.mock_class_max, Some(5));
         assert_eq!(ec.thresholds.test_max_lines, Some(100));
         assert_eq!(ec.thresholds.parameterized_min_ratio, Some(0.2));
+        assert_eq!(ec.thresholds.fixture_max, Some(10));
         assert_eq!(ec.paths.test_patterns, vec!["tests/**", "**/*_test.*"]);
         assert_eq!(ec.paths.ignore, vec!["node_modules", ".venv"]);
     }
@@ -133,6 +136,7 @@ mod tests {
         assert_eq!(config.mock_class_max, 5);
         assert_eq!(config.test_max_lines, 100);
         assert_eq!(config.parameterized_min_ratio, 0.2);
+        assert_eq!(config.fixture_max, 10);
         assert_eq!(config.disabled_rules.len(), 2);
         assert_eq!(config.disabled_rules[0].0, "T004");
         assert_eq!(config.disabled_rules[1].0, "T005");

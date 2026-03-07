@@ -59,6 +59,71 @@ impl Default for TypeScriptExtractor {
     }
 }
 
+/// Count fixture variables from enclosing describe() scopes.
+/// Walk up the AST from the test function, find describe callback bodies,
+/// and count `lexical_declaration` / `variable_declaration` direct children.
+/// Accumulates across all enclosing describes (handles nesting).
+fn count_enclosing_describe_fixtures(root: Node, test_start_byte: usize, source: &[u8]) -> usize {
+    let Some(start_node) = root.descendant_for_byte_range(test_start_byte, test_start_byte) else {
+        return 0;
+    };
+
+    let mut count = 0;
+    let mut current = start_node.parent();
+    while let Some(node) = current {
+        // Look for statement_block that is a describe callback body
+        if node.kind() == "statement_block" && is_describe_callback_body(node, source) {
+            // Count direct children that are variable declarations
+            let child_count = node.named_child_count();
+            for i in 0..child_count {
+                if let Some(child) = node.named_child(i) {
+                    let kind = child.kind();
+                    if kind == "lexical_declaration" || kind == "variable_declaration" {
+                        // Count the number of variable declarators in this declaration
+                        // e.g., `let a, b;` has 2 declarators
+                        let declarator_count = (0..child.named_child_count())
+                            .filter_map(|j| child.named_child(j))
+                            .filter(|c| c.kind() == "variable_declarator")
+                            .count();
+                        count += declarator_count;
+                    }
+                }
+            }
+        }
+        current = node.parent();
+    }
+
+    count
+}
+
+/// Check if a statement_block is the body of a describe() callback.
+/// Pattern: statement_block → arrow_function/function_expression → arguments → call_expression(describe)
+fn is_describe_callback_body(block: Node, source: &[u8]) -> bool {
+    let parent = match block.parent() {
+        Some(p) => p,
+        None => return false,
+    };
+    let kind = parent.kind();
+    if kind != "arrow_function" && kind != "function_expression" {
+        return false;
+    }
+    let args = match parent.parent() {
+        Some(p) if p.kind() == "arguments" => p,
+        _ => return false,
+    };
+    let call = match args.parent() {
+        Some(p) if p.kind() == "call_expression" => p,
+        _ => return false,
+    };
+    // Check if the function being called is "describe"
+    if let Some(func_node) = call.child_by_field_name("function") {
+        if let Ok(name) = func_node.utf8_text(source) {
+            return name == "describe" || name.starts_with("describe.");
+        }
+    }
+    false
+}
+
 fn extract_mock_class_name(var_name: &str) -> String {
     // camelCase: strip "mock" prefix and lowercase first char
     if let Some(stripped) = var_name.strip_prefix("mock") {
@@ -158,6 +223,8 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
             source_bytes,
         );
 
+        let fixture_count = count_enclosing_describe_fixtures(root, tm.fn_start_byte, source_bytes);
+
         let suppressed_rules = extract_suppression_from_previous_line(source, tm.fn_start_row);
 
         functions.push(TestFunction {
@@ -171,6 +238,7 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                 mock_classes,
                 line_count,
                 how_not_what_count: how_not_what_count + private_in_assertion_count,
+                fixture_count,
                 suppressed_rules,
             },
         });
@@ -610,6 +678,83 @@ mod tests {
         assert!(
             q.capture_index_for_name("how_pattern").is_some(),
             "how_not_what.scm must define @how_pattern capture"
+        );
+    }
+
+    // --- T102: fixture-sprawl ---
+
+    #[test]
+    fn fixture_count_for_violation() {
+        let source = fixture("t102_violation.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_violation.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 6,
+            "expected 6 describe-level let declarations"
+        );
+    }
+
+    #[test]
+    fn fixture_count_for_pass() {
+        let source = fixture("t102_pass.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_pass.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 2,
+            "expected 2 describe-level let declarations"
+        );
+    }
+
+    #[test]
+    fn fixture_count_nested_describe() {
+        let source = fixture("t102_nested.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_nested.test.ts");
+        assert_eq!(funcs.len(), 2);
+        // Inner test sees outer (3) + inner (3) = 6
+        let inner = funcs
+            .iter()
+            .find(|f| f.name == "test in nested describe inherits all fixtures")
+            .unwrap();
+        assert_eq!(
+            inner.analysis.fixture_count, 6,
+            "inner test should see outer + inner fixtures"
+        );
+        // Outer test sees only outer (3)
+        let outer = funcs
+            .iter()
+            .find(|f| f.name == "test in outer describe only sees outer fixtures")
+            .unwrap();
+        assert_eq!(
+            outer.analysis.fixture_count, 3,
+            "outer test should see only outer fixtures"
+        );
+    }
+
+    #[test]
+    fn fixture_count_describe_each() {
+        let source = fixture("t102_describe_each.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_describe_each.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 2,
+            "describe.each should be recognized as describe scope"
+        );
+    }
+
+    #[test]
+    fn fixture_count_top_level_test_zero() {
+        // A test outside describe should have 0 fixtures
+        let source = "it('standalone test', () => { expect(1).toBe(1); });";
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "top_level.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.fixture_count, 0,
+            "top-level test should have 0 fixtures"
         );
     }
 

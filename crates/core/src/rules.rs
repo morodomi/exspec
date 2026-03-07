@@ -77,6 +77,7 @@ pub struct Config {
     pub mock_class_max: usize,
     pub test_max_lines: usize,
     pub parameterized_min_ratio: f64,
+    pub fixture_max: usize,
     pub disabled_rules: Vec<RuleId>,
 }
 
@@ -87,6 +88,7 @@ impl Default for Config {
             mock_class_max: 3,
             test_max_lines: 50,
             parameterized_min_ratio: 0.1,
+            fixture_max: 5,
             disabled_rules: Vec::new(),
         }
     }
@@ -150,6 +152,24 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
                 message: format!(
                     "giant-test: {} lines, threshold: {}",
                     analysis.line_count, config.test_max_lines,
+                ),
+                details: None,
+            });
+        }
+
+        // T102: fixture-sprawl
+        if !is_disabled(config, "T102")
+            && !is_suppressed(analysis, "T102")
+            && analysis.fixture_count > config.fixture_max
+        {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T102"),
+                severity: Severity::Warn,
+                file: func.file.clone(),
+                line: Some(func.line),
+                message: format!(
+                    "fixture-sprawl: {} fixtures, threshold: {}",
+                    analysis.fixture_count, config.fixture_max,
                 ),
                 details: None,
             });
@@ -581,6 +601,105 @@ mod tests {
         )];
         let diags = evaluate_rules(&funcs, &Config::default());
         assert!(diags.is_empty());
+    }
+
+    // --- T102: fixture-sprawl ---
+
+    #[test]
+    fn t102_fixture_count_exceeds_threshold_produces_warn() {
+        let funcs = vec![make_func(
+            "test_sprawl",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 7,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleId::new("T102"));
+        assert_eq!(diags[0].severity, Severity::Warn);
+        assert!(diags[0].message.contains("7 fixtures"));
+    }
+
+    #[test]
+    fn t102_fixture_count_at_threshold_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_ok",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 5, // exactly at threshold, strict >
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn t102_zero_fixtures_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_no_fixtures",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 0,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn t102_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_sprawl",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 7,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T102")],
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn t102_suppressed_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_sprawl",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 7,
+                suppressed_rules: vec![RuleId::new("T102")],
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(diags.is_empty());
+    }
+
+    #[test]
+    fn t102_custom_threshold() {
+        let funcs = vec![make_func(
+            "test_sprawl",
+            TestAnalysis {
+                assertion_count: 1,
+                fixture_count: 4,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            fixture_max: 3,
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleId::new("T102"));
     }
 
     // --- Multiple violations ---

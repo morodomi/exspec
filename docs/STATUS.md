@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5B in progress (Tier 2 rules). T101 how-not-what implemented for Python + TypeScript (mock verification + private attribute access).
+Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl implemented for Python + TypeScript.
 
 ## Progress
 
@@ -46,12 +46,13 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what implemented for Python + 
 | T007 | test-source-ratio | INFO | -- | -- | -- | -- |
 | T008 | no-contract | INFO | Yes | Yes | Yes | N/A |
 | T101 | how-not-what | WARN | Yes | Yes | -- | -- |
+| T102 | fixture-sprawl | WARN | Yes | Yes | -- | -- |
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 371 passing | -- |
+| Tests | 386 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
