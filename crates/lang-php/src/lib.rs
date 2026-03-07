@@ -117,6 +117,26 @@ struct TestMatch {
     fn_end_row: usize,
 }
 
+/// Check if a PHP method has a #[DataProvider] attribute.
+fn has_data_provider_attribute(fn_node: Node, source: &[u8]) -> bool {
+    let mut cursor = fn_node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let node = cursor.node();
+            if node.kind() == "attribute_list" {
+                let text = node.utf8_text(source).unwrap_or("");
+                if text.contains("DataProvider") {
+                    return true;
+                }
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Count the number of parameters in a PHP method (formal_parameters).
 fn count_method_params(fn_node: Node) -> usize {
     let params_node = match fn_node.child_by_field_name("parameters") {
@@ -230,7 +250,11 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
             source_bytes,
         );
 
-        let fixture_count = count_method_params(fn_node);
+        let fixture_count = if has_data_provider_attribute(fn_node, source_bytes) {
+            0
+        } else {
+            count_method_params(fn_node)
+        };
 
         let suppressed_rules = extract_suppression_from_previous_line(source, tm.fn_start_row);
 
@@ -980,6 +1004,37 @@ mod tests {
         assert_eq!(
             funcs[0].analysis.fixture_count, 0,
             "expected 0 parameters as fixture_count"
+        );
+    }
+
+    #[test]
+    fn fixture_count_zero_for_dataprovider_method() {
+        let source = fixture("t102_dataprovider.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t102_dataprovider.php");
+        // test_addition: 3 params but has #[DataProvider] -> fixture_count = 0
+        let addition = funcs.iter().find(|f| f.name == "test_addition").unwrap();
+        assert_eq!(
+            addition.analysis.fixture_count, 0,
+            "DataProvider params should not count as fixtures"
+        );
+        // addition_with_test_attr: 3 params + #[DataProvider] + #[Test] -> fixture_count = 0
+        let with_attr = funcs
+            .iter()
+            .find(|f| f.name == "addition_with_test_attr")
+            .unwrap();
+        assert_eq!(
+            with_attr.analysis.fixture_count, 0,
+            "DataProvider params should not count as fixtures even with #[Test]"
+        );
+        // test_with_fixtures: 6 params, no DataProvider -> fixture_count = 6
+        let fixtures = funcs
+            .iter()
+            .find(|f| f.name == "test_with_fixtures")
+            .unwrap();
+        assert_eq!(
+            fixtures.analysis.fixture_count, 6,
+            "non-DataProvider params should count as fixtures"
         );
     }
 }
