@@ -205,13 +205,13 @@ cargo fmt                                       # フォーマット適用
 ## TDD Workflow
 
 ```
-INIT -> PLAN -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
+SPEC -> KICKOFF -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
 ```
 
 | Phase | Action | Skill |
 |-------|--------|-------|
-| INIT | Cycle doc作成、コンテキスト設定 | dev-crew:init |
-| PLAN | 設計・テスト計画 | dev-crew:strategy |
+| SPEC | 設計・テスト計画 (plan mode) | dev-crew:spec |
+| KICKOFF | Cycle doc作成 | dev-crew:kickoff |
 | RED | テスト作成、失敗確認 | dev-crew:red |
 | GREEN | 最小限の実装 | dev-crew:green |
 | REFACTOR | コード品質改善 | dev-crew:refactor |
