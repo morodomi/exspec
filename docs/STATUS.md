@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl + T103 missing-error-test implemented for Python + TypeScript.
+Phase 5B complete (Tier 2 rules). T101-T105 implemented for Python + TypeScript.
 
 ## Progress
 
@@ -20,7 +20,7 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl + T
 | 4.1 - PHP FQCN attribute + Pest arrow function | DONE |
 | 4.2 - Nested class, docblock dedup, FQCN pattern | DONE |
 | 5A - Rust language support (cargo test) | DONE |
-| 5B - Tier 2 rules (T101 how-not-what) | IN PROGRESS |
+| 5B - Tier 2 rules (T101-T105) | DONE |
 | 6 - Tier 3 (AI Prompt generation) | NOT STARTED |
 | 7 - OSS release + Note article + MCP Server | NOT STARTED |
 
@@ -48,12 +48,14 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl + T
 | T101 | how-not-what | WARN | Yes | Yes | -- | -- |
 | T102 | fixture-sprawl | WARN | Yes | Yes | -- | -- |
 | T103 | missing-error-test | INFO | Yes | Yes | -- | -- |
+| T104 | hardcoded-only | INFO | Yes | Yes | -- | -- |
+| T105 | deterministic-no-metamorphic | INFO | Yes | Yes | -- | -- |
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 406 passing | -- |
+| Tests | 431 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -68,4 +70,7 @@ Phase 5B in progress (Tier 2 rules). T101 how-not-what + T102 fixture-sprawl + T
 
 ## Open Issues
 
-None
+- #16: T104 Python keyword_argument false negative
+- #17: T104 TypeScript test coverage gaps
+- #18: Rename stale test sarif_rules_has_10_entries
+- #19: T104 deferral comments + T101 interaction untested

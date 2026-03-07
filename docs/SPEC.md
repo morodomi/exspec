@@ -809,3 +809,214 @@ WARN tests/test_api.py:1  T101 how-not-what: 2 implementation-testing pattern(s)
 **スコープ外**:
 - PHP/Rust: how_not_what_count = 0 固定
 - 2パス方式: `count_captures_within_context()` (core/query_utils.rs)
+
+### T102: fixture-sprawl
+
+テスト関数が依存するフィクスチャ/セットアップ変数が閾値を超えている。
+
+**Default**: WARN
+**Threshold**: `fixture_max = 5` (configurable)
+
+#### Python -- Violation
+
+```python
+# fixtures/python/t102_violation.py
+def test_complex(db, cache, queue, mailer, logger, config):
+    result = process(db, cache, queue, mailer, logger, config)
+    assert result.success
+```
+
+#### Python -- Pass
+
+```python
+# fixtures/python/t102_pass.py
+def test_simple(db, config):
+    result = process(db, config)
+    assert result.success
+```
+
+#### TypeScript -- Violation
+
+```typescript
+// fixtures/typescript/t102_violation.test.ts
+describe('complex', () => {
+  const db = createDb();
+  const cache = createCache();
+  const queue = createQueue();
+  const mailer = createMailer();
+  const logger = createLogger();
+  const config = createConfig();
+
+  test('processes data', () => {
+    expect(process(db)).toBeTruthy();
+  });
+});
+```
+
+#### Detection
+
+- Python: テスト関数のパラメータ数 (`self`/`cls` 除外)
+- TypeScript: テスト関数を囲む `describe` ブロック内の直接の変数宣言数 (ネストされた `describe` は累積)
+- PHP/Rust: fixture_count = 0 固定 (deferred)
+
+### T103: missing-error-test
+
+テストファイル内に異常系 (エラーケース) のテストが1つもない。
+
+**Default**: INFO
+
+#### Python -- Violation
+
+```python
+# fixtures/python/t103_violation.py
+def test_add():
+    assert add(1, 2) == 3
+
+def test_subtract():
+    assert subtract(5, 3) == 2
+```
+
+#### Python -- Pass
+
+```python
+# fixtures/python/t103_pass.py
+def test_add():
+    assert add(1, 2) == 3
+
+def test_invalid_input():
+    with pytest.raises(ValueError):
+        add("a", "b")
+```
+
+#### Detection
+
+`error_test.scm` の `@error_test` で以下をファイル全体スキャン (`has_any_match` パターン):
+
+- Python: `pytest.raises`, `self.assertRaises`, `self.assertRaisesRegex`, `self.assertWarns`, `self.assertWarnsRegex`
+- TypeScript: `.toThrow()`, `.toThrowError()`, `.rejects`
+- PHP/Rust: has_error_test = true 固定 (deferred)
+
+### T104: hardcoded-only
+
+テスト関数内のアサーションが全てハードコードリテラルのみで、変数参照がない。
+
+**Default**: INFO
+**Threshold**: なし (binary)
+
+#### Python -- Violation
+
+```python
+# fixtures/python/t104_violation.py
+def test_add():
+    assert add(1, 2) == 3
+    assert add(0, 0) == 0
+```
+
+#### Python -- Pass
+
+```python
+# fixtures/python/t104_pass_variable.py
+def test_add():
+    result = add(1, 2)
+    assert result == 3
+```
+
+```python
+# fixtures/python/t104_pass_computed.py
+def test_roundtrip():
+    data = b"hello"
+    assert decode(encode(data)) == data
+```
+
+#### TypeScript -- Violation
+
+```typescript
+// fixtures/typescript/t104_violation.test.ts
+test('add', () => {
+  expect(add(1, 2)).toBe(3);
+  expect(add(0, 0)).toBe(0);
+});
+```
+
+#### TypeScript -- Pass
+
+```typescript
+// fixtures/typescript/t104_pass_variable.test.ts
+test('add', () => {
+  const result = add(1, 2);
+  expect(result).toBe(3);
+});
+```
+
+#### Detection
+
+**Node API** (not .scm query) -- callee除外ロジックがquery predicatesでは表現困難なため、Rustで直接ASTウォーク。
+
+`has_non_callee_identifier()` で assertion ノード内を再帰ウォーク:
+1. `identifier` → builtin定数 (Python: True/False/None, TS: undefined/null) でなければ非hardcoded
+2. `call` → `function` フィールドはスキップ (callee)、`arguments` のみ再帰
+3. TypeScript: `has_non_callee_identifier_in_callee_chain()` で `expect(x).toBe(y)` の callee chain を辿りながら各 level の arguments をチェック
+
+**スコープ外**: PHP/Rust: hardcoded_only = false 固定 (deferred)
+
+### T105: deterministic-no-metamorphic
+
+ファイル内の全アサーションが完全一致 (equality) のみで、関係演算 (>, <, in, contains 等) がない。
+
+**Default**: INFO
+**Threshold**: `min_assertions_for_t105 = 5` (configurable)
+
+#### Python -- Violation
+
+```python
+# fixtures/python/t105_violation.py
+def test_a():
+    assert add(1, 2) == 3
+
+def test_b():
+    assert add(0, 0) == 0
+
+# ... (5+ assertions, all ==)
+```
+
+#### Python -- Pass
+
+```python
+# fixtures/python/t105_pass_relational.py
+def test_positive():
+    assert add(1, 2) > 0
+
+def test_contains():
+    assert "hello" in greet("world")
+```
+
+#### TypeScript -- Violation
+
+```typescript
+// fixtures/typescript/t105_violation.test.ts
+test('a', () => { expect(add(1,2)).toBe(3); });
+test('b', () => { expect(add(0,0)).toBe(0); });
+// ... (5+ assertions, all toBe/toEqual)
+```
+
+#### TypeScript -- Pass
+
+```typescript
+// fixtures/typescript/t105_pass_relational.test.ts
+test('positive', () => { expect(add(1,2)).toBeGreaterThan(0); });
+```
+
+#### Detection
+
+`relational_assertion.scm` の `@relational` でファイル全体スキャン (`has_any_match` パターン):
+
+**Python relational patterns** (存在すれば T105 を抑制):
+- comparison operators: `>`, `<`, `>=`, `<=`, `in`, `not in`, `is`, `is not`
+- unittest: `assertGreater`, `assertLess`, `assertIn`, `assertIsInstance`, `assertAlmostEqual`, `assertRegex`, `assertIsNone`, `assertTrue`, `assertFalse` 等
+- `pytest.approx()`
+
+**TypeScript relational patterns**:
+- `toBeGreaterThan`, `toBeLessThan`, `toContain`, `toMatch`, `toBeInstanceOf`, `toBeCloseTo`, `toHaveLength`
+- `toBeNull`, `toBeUndefined`, `toBeDefined`, `toBeTruthy`, `toBeFalsy`, `toBeNaN`
+
+**スコープ外**: PHP/Rust: has_relational_assertion = true 固定 (deferred)
