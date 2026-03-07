@@ -670,4 +670,80 @@ mod tests {
         assert_eq!(fa.functions.len(), 1);
         assert_eq!(fa.functions[0].name, "test_create_user");
     }
+
+    // --- Query capture name verification (#14) ---
+
+    fn make_query(scm: &str) -> Query {
+        Query::new(&php_language(), scm).unwrap()
+    }
+
+    #[test]
+    fn query_capture_names_test_function() {
+        let q = make_query(include_str!("../queries/test_function.scm"));
+        assert!(
+            q.capture_index_for_name("name").is_some(),
+            "test_function.scm must define @name capture"
+        );
+        assert!(
+            q.capture_index_for_name("function").is_some(),
+            "test_function.scm must define @function capture"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_assertion() {
+        let q = make_query(include_str!("../queries/assertion.scm"));
+        assert!(
+            q.capture_index_for_name("assertion").is_some(),
+            "assertion.scm must define @assertion capture"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_mock_usage() {
+        let q = make_query(include_str!("../queries/mock_usage.scm"));
+        assert!(
+            q.capture_index_for_name("mock").is_some(),
+            "mock_usage.scm must define @mock capture"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_mock_assignment() {
+        let q = make_query(include_str!("../queries/mock_assignment.scm"));
+        assert!(
+            q.capture_index_for_name("var_name").is_some(),
+            "mock_assignment.scm must define @var_name (required by collect_mock_class_names .expect())"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_parameterized() {
+        let q = make_query(include_str!("../queries/parameterized.scm"));
+        assert!(
+            q.capture_index_for_name("parameterized").is_some(),
+            "parameterized.scm must define @parameterized capture"
+        );
+    }
+
+    // Comment-only file by design (PHP PBT is not mature).
+    // This assertion will fail when a real PBT library is added.
+    // When that happens, update the has_any_match call site in extract_file_analysis() accordingly.
+    #[test]
+    fn query_capture_names_import_pbt_comment_only() {
+        let q = make_query(include_str!("../queries/import_pbt.scm"));
+        assert!(
+            q.capture_index_for_name("pbt_import").is_none(),
+            "PHP import_pbt.scm is intentionally comment-only"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_import_contract() {
+        let q = make_query(include_str!("../queries/import_contract.scm"));
+        assert!(
+            q.capture_index_for_name("contract_import").is_some(),
+            "import_contract.scm must define @contract_import capture"
+        );
+    }
 }

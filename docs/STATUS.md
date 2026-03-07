@@ -50,7 +50,7 @@ Phase 5A complete (Rust language support). Phase 5B (Tier 2 rules) next.
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 309 passing | -- |
+| Tests | 345 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
