@@ -1118,6 +1118,50 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: expect.soft/element/poll (#31) ---
+
+    #[test]
+    fn t001_expect_soft_counts_as_assertion() {
+        // TC-01: expect.soft(x).toBe(y) -> T001 should NOT fire
+        let source = fixture("t001_expect_soft.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_soft.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect.soft() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_expect_element_counts_as_assertion() {
+        // TC-02: expect.element(locator).toHaveText(text) -> T001 should NOT fire
+        let source = fixture("t001_expect_element.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_element.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect.element() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_expect_poll_counts_as_assertion() {
+        // TC-03: expect.poll(() => value).toBe(expected) -> T001 should NOT fire
+        let source = fixture("t001_expect_poll.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_poll.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect.poll() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t107_skipped_for_typescript() {
         // TypeScript expect() has no message argument, so T107 should never fire.

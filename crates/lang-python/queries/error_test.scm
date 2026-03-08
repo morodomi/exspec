@@ -8,6 +8,14 @@
   (#eq? @_obj "pytest")
   (#eq? @_attr "raises")) @error_test
 
+; pytest.warns(...) — also in assertion.scm for T001
+(call
+  function: (attribute
+    object: (identifier) @_obj_w
+    attribute: (identifier) @_attr_w)
+  (#eq? @_obj_w "pytest")
+  (#eq? @_attr_w "warns")) @error_test
+
 ; self.assertRaises(...)
 (call
   function: (attribute

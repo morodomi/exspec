@@ -1328,6 +1328,36 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: pytest.warns (#34) ---
+
+    #[test]
+    fn t001_pytest_warns_counts_as_assertion() {
+        // TC-04: pytest.warns() only -> T001 should NOT fire
+        let source = fixture("t001_pytest_warns.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_warns.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "pytest.warns() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_pytest_warns_with_match_counts_as_assertion() {
+        // TC-05: pytest.warns() with match -> T001 should NOT fire
+        let source = fixture("t001_pytest_warns_with_match.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_warns_with_match.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "pytest.warns() with match should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t001_self_assert_raises_already_covered() {
         // TC-03: self.assertRaises() -> already matched by ^assert pattern

@@ -17,3 +17,12 @@
     attribute: (identifier) @_pytest_attr)
   (#eq? @_pytest_obj "pytest")
   (#eq? @_pytest_attr "raises")) @assertion
+
+; pytest.warns() — warning verification counts as assertion
+; (also matched in error_test.scm for T103)
+(call
+  function: (attribute
+    object: (identifier) @_pytest_warns_obj
+    attribute: (identifier) @_pytest_warns_attr)
+  (#eq? @_pytest_warns_obj "pytest")
+  (#eq? @_pytest_warns_attr "warns")) @assertion
