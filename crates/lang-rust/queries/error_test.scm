@@ -12,8 +12,6 @@
     field: (field_identifier) @_method)
   (#eq? @_method "unwrap_err")) @error_test
 
-; .is_err() call
-(call_expression
-  function: (field_expression
-    field: (field_identifier) @_method2)
-  (#eq? @_method2 "is_err")) @error_test
+; Note: .is_err() removed — it's a weak proxy. Inside assert!() it becomes
+; token_tree (not detectable), and standalone .is_err() without assertion
+; is not a real error test. See #22.

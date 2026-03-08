@@ -750,6 +750,17 @@ mod tests {
     }
 
     #[test]
+    fn error_test_is_err_only_not_sufficient() {
+        let source = fixture("t103_is_err_only.rs");
+        let extractor = RustExtractor::new();
+        let fa = extractor.extract_file_analysis(&source, "t103_is_err_only.rs");
+        assert!(
+            !fa.has_error_test,
+            ".is_err() alone should not count as error test (weak proxy)"
+        );
+    }
+
+    #[test]
     fn query_capture_names_error_test() {
         let q = make_query(include_str!("../queries/error_test.scm"));
         assert!(
