@@ -12,7 +12,7 @@
     property: (property_identifier) @_method2)
   (#eq? @_method2 "toThrowError")) @error_test
 
-; expect(...).rejects
+; expect(...).rejects — also in assertion.scm for T001
 (member_expression
   object: (call_expression
     function: (identifier) @_fn)

@@ -1074,6 +1074,50 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: rejects chain + expectTypeOf (#25) ---
+
+    #[test]
+    fn t001_expect_to_throw_already_covered() {
+        // TC-04: expect(fn).toThrow() -> already matched
+        let source = "import { it, expect } from 'vitest';\nit('throws', () => { expect(() => fn()).toThrow(); });";
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_throw.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect().toThrow() should already be covered, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_rejects_to_throw_counts_as_assertion() {
+        // TC-05: expect(promise).rejects.toThrow() -> T001 should NOT fire
+        let source = fixture("t001_rejects_to_throw.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_rejects_to_throw.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect().rejects.toThrow() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_expect_type_of_counts_as_assertion() {
+        // TC-06: expectTypeOf() -> T001 should NOT fire
+        let source = fixture("t001_expect_type_of.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_type_of.test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expectTypeOf() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t107_skipped_for_typescript() {
         // TypeScript expect() has no message argument, so T107 should never fire.

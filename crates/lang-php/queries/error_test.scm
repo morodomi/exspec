@@ -1,20 +1,20 @@
 ; Detect error/exception testing patterns in PHP
 
-; $this->expectException(...)
+; $this->expectException(...) — also in assertion.scm for T001
 (member_call_expression
   object: (variable_name) @_obj
   name: (name) @_method
   (#eq? @_obj "$this")
   (#eq? @_method "expectException")) @error_test
 
-; $this->expectExceptionMessage(...)
+; $this->expectExceptionMessage(...) — also in assertion.scm for T001
 (member_call_expression
   object: (variable_name) @_obj2
   name: (name) @_method2
   (#eq? @_obj2 "$this")
   (#eq? @_method2 "expectExceptionMessage")) @error_test
 
-; $this->expectExceptionCode(...)
+; $this->expectExceptionCode(...) — also in assertion.scm for T001
 (member_call_expression
   object: (variable_name) @_obj3
   name: (name) @_method3

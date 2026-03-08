@@ -89,6 +89,8 @@ struct TestMatch {
     fn_end_row: usize,
     /// Row of attribute_item (for suppression lookup)
     attr_start_row: usize,
+    /// Whether #[should_panic] is present (counts as assertion for T001)
+    has_should_panic: bool,
 }
 
 /// Find the root object of a field_expression chain (method call chain).
@@ -262,7 +264,29 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
             let attr_node = attr_capture.node;
             let attr_start_row = attr_node.start_position().row;
 
-            // Walk next siblings to find the function_item
+            // Check previous siblings for #[should_panic] (handles #[should_panic] before #[test]).
+            // Also update attr_start_row to the earliest attribute for suppression comment lookup.
+            let mut has_should_panic = false;
+            let mut attr_start_row = attr_start_row;
+            {
+                let mut prev = attr_node.prev_sibling();
+                while let Some(p) = prev {
+                    if p.kind() == "attribute_item" {
+                        attr_start_row = p.start_position().row;
+                        if let Ok(text) = p.utf8_text(source_bytes) {
+                            if text.contains("should_panic") {
+                                has_should_panic = true;
+                            }
+                        }
+                    } else if p.kind() != "line_comment" && p.kind() != "block_comment" {
+                        break;
+                    }
+                    prev = p.prev_sibling();
+                }
+            }
+
+            // Walk next siblings to find the function_item.
+            // Also detect #[should_panic] among sibling attribute_items.
             let mut sibling = attr_node.next_sibling();
             while let Some(s) = sibling {
                 if s.kind() == "function_item" {
@@ -281,6 +305,7 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                                 fn_start_row: s.start_position().row,
                                 fn_end_row: s.end_position().row,
                                 attr_start_row,
+                                has_should_panic,
                             });
                         }
                     }
@@ -288,10 +313,13 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                 }
                 // Skip over other attribute_items or whitespace nodes
                 // If we hit something that is not an attribute_item, stop
-                if s.kind() != "attribute_item"
-                    && s.kind() != "line_comment"
-                    && s.kind() != "block_comment"
-                {
+                if s.kind() == "attribute_item" {
+                    if let Ok(text) = s.utf8_text(source_bytes) {
+                        if text.contains("should_panic") {
+                            has_should_panic = true;
+                        }
+                    }
+                } else if s.kind() != "line_comment" && s.kind() != "block_comment" {
                     break;
                 }
                 sibling = s.next_sibling();
@@ -310,7 +338,13 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
         let end_line = tm.fn_end_row + 1;
         let line_count = end_line - line + 1;
 
-        let assertion_count = count_captures(assertion_query, "assertion", fn_node, source_bytes);
+        let mut assertion_count =
+            count_captures(assertion_query, "assertion", fn_node, source_bytes);
+
+        // #[should_panic] is outside fn_node (sibling attribute), detected during sibling walk
+        if tm.has_should_panic {
+            assertion_count += 1;
+        }
         let mock_count = count_captures(mock_query, "mock", fn_node, source_bytes);
         let mock_classes = collect_mock_class_names(
             mock_assign_query,
@@ -1100,6 +1134,50 @@ mod tests {
             funcs[0].analysis.duplicate_literal_count < 3,
             "each literal appears once: got {}",
             funcs[0].analysis.duplicate_literal_count
+        );
+    }
+
+    // --- T001 FP fix: #[should_panic] as assertion (#25) ---
+
+    #[test]
+    fn t001_should_panic_counts_as_assertion() {
+        // TC-09: #[should_panic] only -> T001 should NOT fire
+        let source = fixture("t001_should_panic.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_should_panic.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "#[should_panic] should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_should_panic_before_test_counts_as_assertion() {
+        // TC-09c: #[should_panic] BEFORE #[test] -> T001 should NOT fire
+        let source = fixture("t001_should_panic_before_test.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_should_panic_before_test.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "#[should_panic] before #[test] should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_should_panic_in_mod_counts_as_assertion() {
+        // TC-09b: #[should_panic] inside mod tests {} -> T001 should NOT fire
+        let source = fixture("t001_should_panic_in_mod.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_should_panic_in_mod.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "#[should_panic] in mod should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
         );
     }
 }

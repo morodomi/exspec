@@ -1223,4 +1223,34 @@ mod tests {
             funcs[0].analysis.duplicate_literal_count
         );
     }
+
+    // --- T001 FP fix: expectException/Message/Code (#25) ---
+
+    #[test]
+    fn t001_expect_exception_counts_as_assertion() {
+        // TC-07: $this->expectException() only -> T001 should NOT fire
+        let source = fixture("t001_expect_exception.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_exception.php");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "$this->expectException() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_expect_exception_message_counts_as_assertion() {
+        // TC-08: $this->expectExceptionMessage() only -> T001 should NOT fire
+        let source = fixture("t001_expect_exception_message.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_exception_message.php");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "$this->expectExceptionMessage() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
 }

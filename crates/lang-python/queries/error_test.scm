@@ -1,6 +1,6 @@
 ; Detect error/exception testing patterns in Python
 
-; pytest.raises(...)
+; pytest.raises(...) — also in assertion.scm for T001
 (call
   function: (attribute
     object: (identifier) @_obj

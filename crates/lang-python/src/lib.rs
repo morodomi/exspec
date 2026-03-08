@@ -1298,6 +1298,50 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: pytest.raises as assertion (#25) ---
+
+    #[test]
+    fn t001_pytest_raises_counts_as_assertion() {
+        // TC-01: pytest.raises() only -> T001 should NOT fire
+        let source = fixture("t001_pytest_raises.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_raises.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "pytest.raises() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_pytest_raises_with_match_counts_as_assertion() {
+        // TC-02: pytest.raises() with match -> T001 should NOT fire
+        let source = fixture("t001_pytest_raises_with_match.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_raises_with_match.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "pytest.raises() with match should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_self_assert_raises_already_covered() {
+        // TC-03: self.assertRaises() -> already matched by ^assert pattern
+        let source = "import unittest\n\nclass TestUser(unittest.TestCase):\n    def test_invalid(self):\n        self.assertRaises(ValueError, create_user, '')\n";
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_assert_raises.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "self.assertRaises() should already be covered, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t106_pass_trivial_literals() {
         let source = fixture("t106_pass_trivial_literals.py");
