@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5C complete (Tier 2 PHP/Rust expansion). T101-T105 implemented for all 4 languages.
+Phase 5C complete + issue cleanup (#18-#22). T101-T105 implemented for all 4 languages. All open issues resolved.
 
 ## Progress
 
@@ -47,18 +47,23 @@ Phase 5C complete (Tier 2 PHP/Rust expansion). T101-T105 implemented for all 4 l
 | T007 | test-source-ratio | INFO | -- | -- | -- | -- |
 | T008 | no-contract | INFO | Yes | Yes | Yes | N/A |
 | T101 | how-not-what | WARN | Yes | Yes | Yes | Yes* |
-| T102 | fixture-sprawl | WARN | Yes | Yes | Yes | Yes |
-| T103 | missing-error-test | INFO | Yes | Yes | Yes | Yes |
+| T102 | fixture-sprawl | WARN | Yes | Yes | Yes* | Yes* |
+| T103 | missing-error-test | INFO | Yes | Yes | Yes | Yes* |
 | T104 | hardcoded-only | INFO | Yes | Yes | -- | -- |
 | T105 | deterministic-no-metamorphic | INFO | Yes | Yes | Yes | Yes* |
 
-\* Rust: token_tree limitation. Private field access in macros (T101) and relational operators in `assert!()` (T105) are not detectable.
+\* Notes:
+- Rust T101: token_tree limitation — private field access in macros not detectable.
+- Rust T105: token_tree limitation — relational operators in `assert!()` not detectable.
+- PHP T102: `#[DataProvider]` params excluded from fixture count (#20).
+- Rust T102: Smart fixture detection — constructor/struct/macro counted, method calls on locals excluded (#21).
+- Rust T103: `.is_err()` removed as weak proxy — only `#[should_panic]` and `.unwrap_err()` (#22).
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 468 passing | -- |
+| Tests | 471 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -73,6 +78,4 @@ Phase 5C complete (Tier 2 PHP/Rust expansion). T101-T105 implemented for all 4 l
 
 ## Open Issues
 
-- #20 T102 PHP: DataProvider params counted as fixtures (false positive)
-- #21 T102 Rust: let-binding count over-counts (threshold calibration)
-- #22 T103 Rust: `.is_err()` is a weak error-test proxy
+None.
