@@ -1162,6 +1162,110 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: Chai property-style assertions (#32) ---
+
+    #[test]
+    fn t001_chai_property_fixture_all_detected() {
+        // TC-01: All 5 test functions in chai property fixture should have assertions
+        let source = fixture("t001_chai_property.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_chai_property.test.ts");
+        assert_eq!(funcs.len(), 5);
+        for f in &funcs {
+            assert!(
+                f.analysis.assertion_count >= 1,
+                "test '{}' should have assertion_count >= 1, got {}",
+                f.name,
+                f.analysis.assertion_count
+            );
+        }
+    }
+
+    #[test]
+    fn t001_chai_property_depth1_no_double_count() {
+        // TC-02: expect(x).ok (depth 1) -> assertion_count == 1
+        let source = r#"
+import { expect } from 'chai';
+describe('d', () => {
+  it('t', () => {
+    expect(x).ok;
+  });
+});
+"#;
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 1,
+            "depth 1 property should count exactly 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_chai_property_depth3_no_double_count() {
+        // TC-03: expect(x).to.be.true (depth 3) -> assertion_count == 1
+        let source = r#"
+import { expect } from 'chai';
+describe('d', () => {
+  it('t', () => {
+    expect(x).to.be.true;
+  });
+});
+"#;
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 1,
+            "depth 3 property should count exactly 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_chai_property_depth4_no_double_count() {
+        // TC-04: expect(spy).to.have.been.calledOnce (depth 4) -> assertion_count == 1
+        let source = r#"
+import { expect } from 'chai';
+describe('d', () => {
+  it('t', () => {
+    expect(spy).to.have.been.calledOnce;
+  });
+});
+"#;
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 1,
+            "depth 4 property should count exactly 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_chai_property_intermediate_not_counted() {
+        // TC-05: expect(x).to; as bare expression_statement -> assertion_count == 0
+        // .to is NOT in the terminal allowlist, so the allowlist filter rejects it.
+        let source = r#"
+import { expect } from 'chai';
+describe('d', () => {
+  it('t', () => {
+    expect(x).to;
+  });
+});
+"#;
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 0,
+            "intermediate property .to should NOT count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t107_skipped_for_typescript() {
         // TypeScript expect() has no message argument, so T107 should never fire.

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5.5 complete. Gap rules T106-T109 added, T104 deprecated and removed. 16 active rules across 4 languages.
+Phase 6 (Release Hardening) in progress. T001 FP fixes done (#25, #31, #34, #32). 16 active rules, 4 languages, 537 tests.
 
 ## Progress
 
@@ -23,7 +23,7 @@ Phase 5.5 complete. Gap rules T106-T109 added, T104 deprecated and removed. 16 a
 | 5B - Tier 2 rules (T101-T105) Python + TypeScript | DONE |
 | 5C - Tier 2 PHP/Rust expansion (T101-T105) | DONE |
 | 5.5 - Gap rules (T106-T109) + T104 removal | DONE |
-| 6 - Tier 3 (AI Prompt generation) | NOT STARTED |
+| 6 - Release Hardening (FP fixes, dogfooding) | IN PROGRESS |
 | 7 - OSS release + Note article + MCP Server | NOT STARTED |
 
 ## Supported Languages
@@ -69,7 +69,7 @@ Phase 5.5 complete. Gap rules T106-T109 added, T104 deprecated and removed. 16 a
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 516 passing | -- |
+| Tests | 537 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -84,4 +84,13 @@ Phase 5.5 complete. Gap rules T106-T109 added, T104 deprecated and removed. 16 a
 
 ## Open Issues
 
-None.
+| # | Title | Priority |
+|---|-------|----------|
+| #23 | Dogfooding with real projects | P1 |
+| #24 | Severity / default-on review | P1 |
+| #26 | README Limitations and gradual adoption guide | P2 |
+| #27 | CI integration examples in README | P2 |
+| #29 | Rust should_panic tighten substring match | P3 (Phase 8) |
+| #30 | PHP $this matching style alignment | P3 (Phase 8) |
+| #33 | T001 FP: Custom assertion helpers + .exspec.toml | P1 |
+| #35 | T001: Chai property in return/assignment context | P2 (Phase 8) |
