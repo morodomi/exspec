@@ -8,7 +8,9 @@ pub struct TestAnalysis {
     pub line_count: usize,
     pub how_not_what_count: usize,
     pub fixture_count: usize,
-    pub hardcoded_only: bool,
+    pub has_wait: bool,
+    pub assertion_message_count: usize,
+    pub duplicate_literal_count: usize,
     pub suppressed_rules: Vec<RuleId>,
 }
 
@@ -71,7 +73,9 @@ mod tests {
         assert_eq!(analysis.line_count, 0);
         assert_eq!(analysis.how_not_what_count, 0);
         assert_eq!(analysis.fixture_count, 0);
-        assert!(!analysis.hardcoded_only);
+        assert!(!analysis.has_wait);
+        assert_eq!(analysis.assertion_message_count, 0);
+        assert_eq!(analysis.duplicate_literal_count, 0);
         assert!(analysis.suppressed_rules.is_empty());
     }
 

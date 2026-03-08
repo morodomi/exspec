@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor, TestAnalysis, TestFunction};
 use exspec_core::query_utils::{
     collect_mock_class_names, count_captures, count_captures_within_context,
-    extract_suppression_from_previous_line, has_any_match,
+    count_duplicate_literals, extract_suppression_from_previous_line, has_any_match,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
@@ -19,6 +19,7 @@ const HOW_NOT_WHAT_QUERY: &str = include_str!("../queries/how_not_what.scm");
 const PRIVATE_IN_ASSERTION_QUERY: &str = include_str!("../queries/private_in_assertion.scm");
 const ERROR_TEST_QUERY: &str = include_str!("../queries/error_test.scm");
 const RELATIONAL_ASSERTION_QUERY: &str = include_str!("../queries/relational_assertion.scm");
+const WAIT_AND_SEE_QUERY: &str = include_str!("../queries/wait_and_see.scm");
 
 fn rust_language() -> tree_sitter::Language {
     tree_sitter_rust::LANGUAGE.into()
@@ -39,6 +40,7 @@ static HOW_NOT_WHAT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static PRIVATE_IN_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static ERROR_TEST_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static RELATIONAL_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+static WAIT_AND_SEE_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
 pub struct RustExtractor;
 
@@ -136,6 +138,65 @@ fn is_fixture_value(node: Node) -> bool {
     }
 }
 
+/// Count Rust assertion macros that have a message argument.
+/// assert!(expr, "msg") has 1+ top-level commas in token_tree.
+/// assert_eq!(a, b, "msg") has 2+ top-level commas in token_tree.
+fn count_assertion_messages_rust(assertion_query: &Query, fn_node: Node, source: &[u8]) -> usize {
+    let assertion_idx = match assertion_query.capture_index_for_name("assertion") {
+        Some(idx) => idx,
+        None => return 0,
+    };
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(assertion_query, fn_node, source);
+    let mut count = 0;
+    while let Some(m) = matches.next() {
+        for cap in m.captures.iter().filter(|c| c.index == assertion_idx) {
+            let node = cap.node;
+            let macro_name = node
+                .child_by_field_name("macro")
+                .and_then(|n| n.utf8_text(source).ok())
+                .unwrap_or("");
+
+            // Find token_tree child
+            let token_tree = (0..node.child_count()).find_map(|i| {
+                let child = node.child(i)?;
+                if child.kind() == "token_tree" {
+                    Some(child)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(tt) = token_tree {
+                // Count top-level commas in token_tree.
+                // token_tree includes outer delimiters "(", ")".
+                // Only count commas that are direct children of this token_tree
+                // (not inside nested token_tree children).
+                let mut comma_count = 0;
+                for i in 0..tt.child_count() {
+                    if let Some(child) = tt.child(i) {
+                        if child.kind() == "," {
+                            comma_count += 1;
+                        }
+                    }
+                }
+
+                // assert!(expr): needs 1+ comma for msg
+                // assert_eq!(a, b): needs 2+ commas for msg
+                let min_commas = if macro_name.contains("_eq") || macro_name.contains("_ne") {
+                    2
+                } else {
+                    1
+                };
+                if comma_count >= min_commas {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
 /// Count fixture-like `let` declarations in a Rust function body.
 /// Excludes method calls on local variables (action/assertion prep).
 fn count_fixture_lets(fn_node: Node) -> usize {
@@ -177,6 +238,7 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
         &PRIVATE_IN_ASSERTION_QUERY_CACHE,
         PRIVATE_IN_ASSERTION_QUERY,
     );
+    let wait_query = cached_query(&WAIT_AND_SEE_QUERY_CACHE, WAIT_AND_SEE_QUERY);
 
     let source_bytes = source.as_bytes();
 
@@ -270,6 +332,21 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
 
         let fixture_count = count_fixture_lets(fn_node);
 
+        // T108: wait-and-see detection
+        let has_wait = has_any_match(wait_query, "wait", fn_node, source_bytes);
+
+        // T107: assertion message count
+        let assertion_message_count =
+            count_assertion_messages_rust(assertion_query, fn_node, source_bytes);
+
+        // T106: duplicate literal count
+        let duplicate_literal_count = count_duplicate_literals(
+            assertion_query,
+            fn_node,
+            source_bytes,
+            &["integer_literal", "float_literal", "string_literal"],
+        );
+
         // Suppression comment is the line before the attribute_item
         let suppressed_rules = extract_suppression_from_previous_line(source, tm.attr_start_row);
 
@@ -285,7 +362,9 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                 line_count,
                 how_not_what_count: how_not_what_count + private_in_assertion_count,
                 fixture_count,
-                hardcoded_only: false, // T104 deferred for Rust: false to suppress noise
+                has_wait,
+                assertion_message_count,
+                duplicate_literal_count,
                 suppressed_rules,
             },
         });
@@ -893,6 +972,134 @@ mod tests {
         assert_eq!(
             funcs[0].analysis.fixture_count, 6,
             "scoped calls (3) + struct (1) + macro (1) + builder chain (1) = 6, method calls on locals excluded"
+        );
+    }
+
+    // --- T108: wait-and-see ---
+
+    #[test]
+    fn wait_and_see_violation_sleep() {
+        let source = fixture("t108_violation_sleep.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t108_violation_sleep.rs");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                func.analysis.has_wait,
+                "test '{}' should have has_wait=true",
+                func.name
+            );
+        }
+    }
+
+    #[test]
+    fn wait_and_see_pass_no_sleep() {
+        let source = fixture("t108_pass_no_sleep.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t108_pass_no_sleep.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            !funcs[0].analysis.has_wait,
+            "test without sleep should have has_wait=false"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_wait_and_see() {
+        let q = make_query(include_str!("../queries/wait_and_see.scm"));
+        assert!(
+            q.capture_index_for_name("wait").is_some(),
+            "wait_and_see.scm must define @wait capture"
+        );
+    }
+
+    // --- T107: assertion-roulette ---
+
+    #[test]
+    fn t107_violation_no_messages() {
+        let source = fixture("t107_violation.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t107_violation.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 2,
+            "should have multiple assertions"
+        );
+        assert_eq!(
+            funcs[0].analysis.assertion_message_count, 0,
+            "no assertion should have a message"
+        );
+    }
+
+    #[test]
+    fn t107_pass_with_messages() {
+        let source = fixture("t107_pass_with_messages.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t107_pass_with_messages.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_message_count >= 1,
+            "assertions with messages should be counted"
+        );
+    }
+
+    // --- T109: undescriptive-test-name ---
+
+    #[test]
+    fn t109_violation_names_detected() {
+        let source = fixture("t109_violation.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t109_violation.rs");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                exspec_core::rules::is_undescriptive_test_name(&func.name),
+                "test '{}' should be undescriptive",
+                func.name
+            );
+        }
+    }
+
+    #[test]
+    fn t109_pass_descriptive_names() {
+        let source = fixture("t109_pass.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t109_pass.rs");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                !exspec_core::rules::is_undescriptive_test_name(&func.name),
+                "test '{}' should be descriptive",
+                func.name
+            );
+        }
+    }
+
+    // --- T106: duplicate-literal-assertion ---
+
+    #[test]
+    fn t106_violation_duplicate_literal() {
+        let source = fixture("t106_violation.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t106_violation.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.duplicate_literal_count >= 3,
+            "42 appears 3 times, should be >= 3: got {}",
+            funcs[0].analysis.duplicate_literal_count
+        );
+    }
+
+    #[test]
+    fn t106_pass_no_duplicates() {
+        let source = fixture("t106_pass_no_duplicates.rs");
+        let extractor = RustExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t106_pass_no_duplicates.rs");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.duplicate_literal_count < 3,
+            "each literal appears once: got {}",
+            funcs[0].analysis.duplicate_literal_count
         );
     }
 }

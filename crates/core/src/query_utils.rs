@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor};
@@ -61,12 +61,30 @@ where
     names.into_iter().collect()
 }
 
+/// Collect byte ranges of all captures matching `capture_name` in `query`.
+fn collect_capture_ranges(
+    query: &Query,
+    capture_name: &str,
+    node: Node,
+    source: &[u8],
+) -> Vec<(usize, usize)> {
+    let idx = match query.capture_index_for_name(capture_name) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let mut ranges = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, node, source);
+    while let Some(m) = matches.next() {
+        for c in m.captures.iter().filter(|c| c.index == idx) {
+            ranges.push((c.node.start_byte(), c.node.end_byte()));
+        }
+    }
+    ranges
+}
+
 /// Count captures of `inner_capture` from `inner_query` that fall within
 /// byte ranges of `outer_capture` from `outer_query`.
-///
-/// 2-pass approach:
-/// 1. Collect byte ranges from outer_query's outer_capture
-/// 2. Count inner_query's inner_capture matches that fall within those ranges
 pub fn count_captures_within_context(
     outer_query: &Query,
     outer_capture: &str,
@@ -75,48 +93,101 @@ pub fn count_captures_within_context(
     node: Node,
     source: &[u8],
 ) -> usize {
-    let outer_idx = match outer_query.capture_index_for_name(outer_capture) {
-        Some(i) => i,
-        None => return 0,
-    };
+    let ranges = collect_capture_ranges(outer_query, outer_capture, node, source);
+    if ranges.is_empty() {
+        return 0;
+    }
+
     let inner_idx = match inner_query.capture_index_for_name(inner_capture) {
         Some(i) => i,
         None => return 0,
     };
 
-    // Pass 1: collect byte ranges of outer captures
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    {
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(outer_query, node, source);
-        while let Some(m) = matches.next() {
-            for c in m.captures.iter().filter(|c| c.index == outer_idx) {
-                ranges.push((c.node.start_byte(), c.node.end_byte()));
-            }
-        }
-    }
-
-    if ranges.is_empty() {
-        return 0;
-    }
-
-    // Pass 2: count inner captures that fall within any outer range
     let mut count = 0;
-    {
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(inner_query, node, source);
-        while let Some(m) = matches.next() {
-            for c in m.captures.iter().filter(|c| c.index == inner_idx) {
-                let start = c.node.start_byte();
-                let end = c.node.end_byte();
-                if ranges.iter().any(|(rs, re)| start >= *rs && end <= *re) {
-                    count += 1;
-                }
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(inner_query, node, source);
+    while let Some(m) = matches.next() {
+        for c in m.captures.iter().filter(|c| c.index == inner_idx) {
+            let start = c.node.start_byte();
+            let end = c.node.end_byte();
+            if ranges.iter().any(|(rs, re)| start >= *rs && end <= *re) {
+                count += 1;
             }
         }
     }
 
     count
+}
+
+// Literals considered too common to flag as duplicates.
+// Cross-language superset: Python (True/False/None), JS (null/undefined), PHP/Ruby (nil).
+const TRIVIAL_LITERALS: &[&str] = &[
+    "0",
+    "1",
+    "2",
+    "true",
+    "false",
+    "True",
+    "False",
+    "None",
+    "null",
+    "undefined",
+    "nil",
+    "\"\"",
+    "''",
+    "0.0",
+    "1.0",
+];
+
+/// Count the maximum number of times any non-trivial literal appears
+/// within assertion nodes of the given function node.
+///
+/// `assertion_query` must have an `@assertion` capture.
+/// `literal_kinds` lists the tree-sitter node kind names that represent literals
+/// for the target language (e.g., `["integer", "float", "string"]` for Python).
+pub fn count_duplicate_literals(
+    assertion_query: &Query,
+    node: Node,
+    source: &[u8],
+    literal_kinds: &[&str],
+) -> usize {
+    let ranges = collect_capture_ranges(assertion_query, "assertion", node, source);
+    if ranges.is_empty() {
+        return 0;
+    }
+
+    // Walk tree, collect literals within assertion ranges
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        let start = n.start_byte();
+        let end = n.end_byte();
+
+        // Prune subtrees that don't overlap with any assertion range
+        let overlaps_any = ranges.iter().any(|(rs, re)| end > *rs && start < *re);
+        if !overlaps_any {
+            continue;
+        }
+
+        if literal_kinds.contains(&n.kind()) {
+            let in_assertion = ranges.iter().any(|(rs, re)| start >= *rs && end <= *re);
+            if in_assertion {
+                if let Ok(text) = n.utf8_text(source) {
+                    if !TRIVIAL_LITERALS.contains(&text) {
+                        *counts.entry(text.to_string()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        for i in 0..n.child_count() {
+            if let Some(child) = n.child(i) {
+                stack.push(child);
+            }
+        }
+    }
+
+    counts.values().copied().max().unwrap_or(0)
 }
 
 pub fn extract_suppression_from_previous_line(source: &str, start_row: usize) -> Vec<RuleId> {
@@ -320,5 +391,80 @@ mod tests {
             source.as_bytes(),
         );
         assert_eq!(count, 0, "missing inner capture should return 0");
+    }
+
+    // --- count_duplicate_literals ---
+
+    #[test]
+    fn count_duplicate_literals_detects_repeated_value() {
+        let source = "def test_foo():\n    assert calc(1) == 42\n    assert calc(2) == 42\n    assert calc(3) == 42\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&python_language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let assertion_query =
+            Query::new(&python_language(), "(assert_statement) @assertion").unwrap();
+        let count = count_duplicate_literals(
+            &assertion_query,
+            root,
+            source.as_bytes(),
+            &["integer", "float", "string"],
+        );
+        assert_eq!(count, 3, "42 appears 3 times in assertions");
+    }
+
+    #[test]
+    fn count_duplicate_literals_trivial_excluded() {
+        // All literals are trivial (0, 1, 2) - should return 0
+        let source =
+            "def test_foo():\n    assert calc(1) == 0\n    assert calc(2) == 0\n    assert calc(1) == 0\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&python_language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let assertion_query =
+            Query::new(&python_language(), "(assert_statement) @assertion").unwrap();
+        let count = count_duplicate_literals(
+            &assertion_query,
+            root,
+            source.as_bytes(),
+            &["integer", "float", "string"],
+        );
+        assert_eq!(count, 0, "0, 1, 2 are all trivial and should be excluded");
+    }
+
+    #[test]
+    fn count_duplicate_literals_no_assertions() {
+        let source = "def test_foo():\n    x = 42\n    y = 42\n    z = 42\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&python_language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        let assertion_query =
+            Query::new(&python_language(), "(assert_statement) @assertion").unwrap();
+        let count = count_duplicate_literals(
+            &assertion_query,
+            root,
+            source.as_bytes(),
+            &["integer", "float", "string"],
+        );
+        assert_eq!(count, 0, "no assertions, should return 0");
+    }
+
+    #[test]
+    fn count_duplicate_literals_missing_capture() {
+        let source = "def test_foo():\n    assert 42 == 42\n";
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&python_language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        let root = tree.root_node();
+
+        // Query without @assertion capture
+        let query = Query::new(&python_language(), "(assert_statement) @something_else").unwrap();
+        let count = count_duplicate_literals(&query, root, source.as_bytes(), &["integer"]);
+        assert_eq!(count, 0, "missing @assertion capture should return 0");
     }
 }

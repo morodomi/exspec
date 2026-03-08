@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor, TestAnalysis, TestFunction};
 use exspec_core::query_utils::{
     collect_mock_class_names, count_captures, count_captures_within_context,
-    extract_suppression_from_previous_line, has_any_match,
+    count_duplicate_literals, extract_suppression_from_previous_line, has_any_match,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, Query, QueryCursor};
@@ -19,6 +19,7 @@ const HOW_NOT_WHAT_QUERY: &str = include_str!("../queries/how_not_what.scm");
 const PRIVATE_IN_ASSERTION_QUERY: &str = include_str!("../queries/private_in_assertion.scm");
 const ERROR_TEST_QUERY: &str = include_str!("../queries/error_test.scm");
 const RELATIONAL_ASSERTION_QUERY: &str = include_str!("../queries/relational_assertion.scm");
+const WAIT_AND_SEE_QUERY: &str = include_str!("../queries/wait_and_see.scm");
 
 fn python_language() -> tree_sitter::Language {
     tree_sitter_python::LANGUAGE.into()
@@ -39,6 +40,7 @@ static HOW_NOT_WHAT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static PRIVATE_IN_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static ERROR_TEST_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 static RELATIONAL_ASSERTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+static WAIT_AND_SEE_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
 pub struct PythonExtractor;
 
@@ -110,6 +112,7 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
         &PRIVATE_IN_ASSERTION_QUERY_CACHE,
         PRIVATE_IN_ASSERTION_QUERY,
     );
+    let wait_query = cached_query(&WAIT_AND_SEE_QUERY_CACHE, WAIT_AND_SEE_QUERY);
 
     let name_idx = test_query
         .capture_index_for_name("name")
@@ -227,8 +230,20 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
         // Fixture count: number of function parameters (excluding `self`)
         let fixture_count = count_function_params(fn_node, source_bytes);
 
-        // T104: hardcoded-only detection
-        let hardcoded_only = is_hardcoded_only_py(assertion_query, fn_node, source_bytes);
+        // T108: wait-and-see detection
+        let has_wait = has_any_match(wait_query, "wait", fn_node, source_bytes);
+
+        // T107: assertion message count
+        let assertion_message_count =
+            count_assertion_messages_py(assertion_query, fn_node, source_bytes);
+
+        // T106: duplicate literal count
+        let duplicate_literal_count = count_duplicate_literals(
+            assertion_query,
+            fn_node,
+            source_bytes,
+            &["integer", "float", "string"],
+        );
 
         let suppress_row = tm.decorated_start_row.unwrap_or(tm.fn_start_row);
         let suppressed_rules = extract_suppression_from_previous_line(source, suppress_row);
@@ -245,7 +260,9 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                 line_count,
                 how_not_what_count: how_not_what_count + private_in_assertion_count,
                 fixture_count,
-                hardcoded_only,
+                has_wait,
+                assertion_message_count,
+                duplicate_literal_count,
                 suppressed_rules,
             },
         });
@@ -351,80 +368,58 @@ fn count_function_params(fn_node: Node, source: &[u8]) -> usize {
     count
 }
 
-/// Python builtin constants that should be excluded from identifier checks.
-const PYTHON_BUILTIN_CONSTANTS: &[&str] = &["True", "False", "None"];
-
-/// Check if any non-callee identifier exists within the given node.
-/// Returns true if a variable/identifier (not a function call name, not a builtin constant) is found.
-fn has_non_callee_identifier_py(node: Node, source: &[u8]) -> bool {
-    if node.kind() == "identifier" {
-        if let Ok(name) = node.utf8_text(source) {
-            return !PYTHON_BUILTIN_CONSTANTS.contains(&name);
-        }
-        return true;
-    }
-    if node.kind() == "keyword_argument" {
-        // Skip name field (parameter name), recurse into value only
-        if let Some(val) = node.child_by_field_name("value") {
-            return has_non_callee_identifier_py(val, source);
-        }
-        return false;
-    }
-    if node.kind() == "call" {
-        // Skip function field (callee), recurse into arguments only
-        if let Some(args) = node.child_by_field_name("arguments") {
-            for i in 0..args.named_child_count() {
-                if let Some(child) = args.named_child(i) {
-                    if has_non_callee_identifier_py(child, source) {
-                        return true;
+/// Count assertion statements that have a failure message.
+/// Python: `assert expr, "msg"` has named child "msg". `self.assert*(a, b, msg)` has 3+ args.
+fn count_assertion_messages_py(assertion_query: &Query, fn_node: Node, source: &[u8]) -> usize {
+    let assertion_idx = match assertion_query.capture_index_for_name("assertion") {
+        Some(idx) => idx,
+        None => return 0,
+    };
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(assertion_query, fn_node, source);
+    let mut count = 0;
+    while let Some(m) = matches.next() {
+        for cap in m.captures.iter().filter(|c| c.index == assertion_idx) {
+            let node = cap.node;
+            if node.kind() == "assert_statement" {
+                // assert_statement fields: condition (required), msg (optional)
+                // If named_child_count > 1, the second child is the message
+                if node.named_child_count() > 1 {
+                    count += 1;
+                }
+            } else if node.kind() == "call" {
+                // self.assert*(a, b) -> 2 args, self.assert*(a, b, msg) -> 3 args
+                // arguments node contains the args
+                if let Some(args) = node.child_by_field_name("arguments") {
+                    // For assertTrue(x, msg): 2+ args means message present
+                    // For assertEqual(a, b, msg): 3+ args means message present
+                    // Heuristic: if method name starts with "assert" and has >=3 args,
+                    // or assertTrue/assertFalse with >=2 args, it has a message.
+                    // Simpler: any self.assert* with an odd number of args for comparison
+                    // asserts, or just check if last arg is a string.
+                    //
+                    // Actually simplest: for unittest methods, the message is typically
+                    // the last argument. We can't reliably distinguish without knowing
+                    // the method signature. Let's use: named_child_count >= 3 for
+                    // assertEqual/assertIn etc., >= 2 for assertTrue/assertFalse.
+                    //
+                    // Simplification: just check if there are "many" args relative to
+                    // the minimum needed. For now, check if last arg is a string literal.
+                    let arg_count = args.named_child_count();
+                    if arg_count > 0 {
+                        if let Some(last_arg) = args.named_child(arg_count - 1) {
+                            if last_arg.kind() == "string"
+                                || last_arg.kind() == "concatenated_string"
+                            {
+                                count += 1;
+                            }
+                        }
                     }
                 }
             }
         }
-        return false;
     }
-    // For attribute access (e.g. obj.attr), check the object part
-    if node.kind() == "attribute" {
-        if let Some(obj) = node.child_by_field_name("object") {
-            return has_non_callee_identifier_py(obj, source);
-        }
-        return false;
-    }
-    // Recurse into children
-    for i in 0..node.named_child_count() {
-        if let Some(child) = node.named_child(i) {
-            if has_non_callee_identifier_py(child, source) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-/// Determine if a test function has only hardcoded literals in its assertions.
-/// Returns true when assertion_count > 0 AND no non-callee identifier is found in any assertion.
-fn is_hardcoded_only_py(assertion_query: &Query, fn_node: Node, source: &[u8]) -> bool {
-    let assertion_idx = match assertion_query.capture_index_for_name("assertion") {
-        Some(idx) => idx,
-        None => return false,
-    };
-
-    let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(assertion_query, fn_node, source);
-    let mut found_assertion = false;
-
-    while let Some(m) = matches.next() {
-        for capture in m.captures {
-            if capture.index == assertion_idx {
-                found_assertion = true;
-                if has_non_callee_identifier_py(capture.node, source) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    found_assertion
+    count
 }
 
 fn extract_mock_class_name(var_name: &str) -> String {
@@ -1108,99 +1103,6 @@ mod tests {
         );
     }
 
-    // --- T104: hardcoded-only ---
-
-    #[test]
-    fn hardcoded_only_violation() {
-        let source = fixture("t104_violation.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_violation.py");
-        assert!(!funcs.is_empty());
-        for func in &funcs {
-            assert!(
-                func.analysis.hardcoded_only,
-                "test '{}' should be hardcoded_only",
-                func.name
-            );
-        }
-    }
-
-    #[test]
-    fn hardcoded_only_pass_variable() {
-        let source = fixture("t104_pass_variable.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_pass_variable.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            !funcs[0].analysis.hardcoded_only,
-            "variable in assertion should not be hardcoded_only"
-        );
-    }
-
-    #[test]
-    fn hardcoded_only_pass_computed() {
-        let source = fixture("t104_pass_computed.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_pass_computed.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            !funcs[0].analysis.hardcoded_only,
-            "computed value in assertion should not be hardcoded_only"
-        );
-    }
-
-    #[test]
-    fn hardcoded_only_no_assertion() {
-        let source = fixture("t104_no_assertion.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_no_assertion.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            !funcs[0].analysis.hardcoded_only,
-            "no assertion should not be hardcoded_only"
-        );
-    }
-
-    #[test]
-    fn hardcoded_only_pass_loop() {
-        let source = fixture("t104_pass_loop.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_pass_loop.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            !funcs[0].analysis.hardcoded_only,
-            "loop variable in assertion should not be hardcoded_only"
-        );
-    }
-
-    #[test]
-    fn hardcoded_only_keyword_arg_is_violation() {
-        let source = fixture("t104_keyword_arg.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_keyword_arg.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            funcs[0].analysis.hardcoded_only,
-            "keyword_argument with only literals should be hardcoded_only"
-        );
-    }
-
-    #[test]
-    fn t104_t101_interaction_both_fire() {
-        let source = fixture("t104_t101_interaction.py");
-        let extractor = PythonExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t104_t101_interaction.py");
-        assert_eq!(funcs.len(), 1);
-        assert!(
-            funcs[0].analysis.how_not_what_count > 0,
-            "mock.assert_called() should trigger how_not_what"
-        );
-        assert!(
-            funcs[0].analysis.hardcoded_only,
-            "hardcoded assertion should trigger hardcoded_only"
-        );
-    }
-
     // --- T105: deterministic-no-metamorphic ---
 
     #[test]
@@ -1253,6 +1155,159 @@ mod tests {
         assert!(
             q.capture_index_for_name("relational").is_some(),
             "relational_assertion.scm must define @relational capture"
+        );
+    }
+
+    // --- T108: wait-and-see ---
+
+    #[test]
+    fn wait_and_see_violation_sleep() {
+        let source = fixture("t108_violation_sleep.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t108_violation_sleep.py");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                func.analysis.has_wait,
+                "test '{}' should have has_wait=true",
+                func.name
+            );
+        }
+    }
+
+    #[test]
+    fn wait_and_see_pass_no_sleep() {
+        let source = fixture("t108_pass_no_sleep.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t108_pass_no_sleep.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            !funcs[0].analysis.has_wait,
+            "test without sleep should have has_wait=false"
+        );
+    }
+
+    #[test]
+    fn query_capture_names_wait_and_see() {
+        let q = make_query(include_str!("../queries/wait_and_see.scm"));
+        assert!(
+            q.capture_index_for_name("wait").is_some(),
+            "wait_and_see.scm must define @wait capture"
+        );
+    }
+
+    // --- T107: assertion-roulette ---
+
+    #[test]
+    fn t107_violation_no_messages() {
+        let source = fixture("t107_violation.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t107_violation.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_count >= 2,
+            "should have multiple assertions"
+        );
+        assert_eq!(
+            funcs[0].analysis.assertion_message_count, 0,
+            "no assertion should have a message"
+        );
+    }
+
+    #[test]
+    fn t107_pass_with_messages() {
+        let source = fixture("t107_pass_with_messages.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t107_pass_with_messages.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.assertion_message_count >= 1,
+            "assertions with messages should be counted"
+        );
+    }
+
+    #[test]
+    fn t107_pass_single_assert() {
+        let source = fixture("t107_pass_single_assert.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t107_pass_single_assert.py");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 1,
+            "single assertion does not trigger T107"
+        );
+    }
+
+    // --- T109: undescriptive-test-name ---
+
+    #[test]
+    fn t109_violation_names_detected() {
+        let source = fixture("t109_violation.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t109_violation.py");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                exspec_core::rules::is_undescriptive_test_name(&func.name),
+                "test '{}' should be undescriptive",
+                func.name
+            );
+        }
+    }
+
+    #[test]
+    fn t109_pass_descriptive_names() {
+        let source = fixture("t109_pass.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t109_pass.py");
+        assert!(!funcs.is_empty());
+        for func in &funcs {
+            assert!(
+                !exspec_core::rules::is_undescriptive_test_name(&func.name),
+                "test '{}' should be descriptive",
+                func.name
+            );
+        }
+    }
+
+    // --- T106: duplicate-literal-assertion ---
+
+    #[test]
+    fn t106_violation_duplicate_literal() {
+        let source = fixture("t106_violation.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t106_violation.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.duplicate_literal_count >= 3,
+            "42 appears 4 times, should be >= 3: got {}",
+            funcs[0].analysis.duplicate_literal_count
+        );
+    }
+
+    #[test]
+    fn t106_pass_no_duplicates() {
+        let source = fixture("t106_pass_no_duplicates.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t106_pass_no_duplicates.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.duplicate_literal_count < 3,
+            "each literal appears once: got {}",
+            funcs[0].analysis.duplicate_literal_count
+        );
+    }
+
+    #[test]
+    fn t106_pass_trivial_literals() {
+        let source = fixture("t106_pass_trivial_literals.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t106_pass_trivial_literals.py");
+        assert_eq!(funcs.len(), 1);
+        assert!(
+            funcs[0].analysis.duplicate_literal_count < 3,
+            "0 is trivial, should not count: got {}",
+            funcs[0].analysis.duplicate_literal_count
         );
     }
 }

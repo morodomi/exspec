@@ -84,8 +84,11 @@ exspec --format sarif .       # SARIF (GitHub Code Scanning)
 | T101 | how-not-what | WARN |
 | T102 | fixture-sprawl | WARN |
 | T103 | missing-error-test | INFO |
-| T104 | hardcoded-only | INFO |
-| T105 | deterministic-no-metamorphic | WARN |
+| T105 | deterministic-no-metamorphic | INFO |
+| T106 | duplicate-literal-assertion | INFO |
+| T107 | assertion-roulette | WARN |
+| T108 | wait-and-see | WARN |
+| T109 | undescriptive-test-name | INFO |
 
 ### Tier 3 (v1.0) -- AI Prompt Generation
 

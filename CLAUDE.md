@@ -82,8 +82,11 @@ queries/
 | T101 | how-not-what (実装検証パターン) | WARN |
 | T102 | fixture-sprawl (共通helper依存過多) | WARN |
 | T103 | missing-error-test (異常系テストなし) | INFO |
-| T104 | hardcoded-only (リテラル値のみ) | INFO |
 | T105 | deterministic-no-metamorphic | INFO |
+| T106 | duplicate-literal-assertion | INFO |
+| T107 | assertion-roulette | WARN |
+| T108 | wait-and-see | WARN |
+| T109 | undescriptive-test-name | INFO |
 
 ### Tier 3: v1.0 (AI検査プロンプト生成)
 

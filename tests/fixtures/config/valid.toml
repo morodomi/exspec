@@ -11,6 +11,7 @@ test_max_lines = 100
 parameterized_min_ratio = 0.2
 fixture_max = 10
 min_assertions_for_t105 = 8
+min_duplicate_count = 4
 
 [paths]
 test_patterns = ["tests/**", "**/*_test.*"]

@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 5C complete + issue cleanup (#18-#22). T101-T105 implemented for all 4 languages. All open issues resolved.
+Phase 5.5 complete. Gap rules T106-T109 added, T104 deprecated and removed. 16 active rules across 4 languages.
 
 ## Progress
 
@@ -22,6 +22,7 @@ Phase 5C complete + issue cleanup (#18-#22). T101-T105 implemented for all 4 lan
 | 5A - Rust language support (cargo test) | DONE |
 | 5B - Tier 2 rules (T101-T105) Python + TypeScript | DONE |
 | 5C - Tier 2 PHP/Rust expansion (T101-T105) | DONE |
+| 5.5 - Gap rules (T106-T109) + T104 removal | DONE |
 | 6 - Tier 3 (AI Prompt generation) | NOT STARTED |
 | 7 - OSS release + Note article + MCP Server | NOT STARTED |
 
@@ -49,21 +50,26 @@ Phase 5C complete + issue cleanup (#18-#22). T101-T105 implemented for all 4 lan
 | T101 | how-not-what | WARN | Yes | Yes | Yes | Yes* |
 | T102 | fixture-sprawl | WARN | Yes | Yes | Yes* | Yes* |
 | T103 | missing-error-test | INFO | Yes | Yes | Yes | Yes* |
-| T104 | hardcoded-only | INFO | Yes | Yes | -- | -- |
 | T105 | deterministic-no-metamorphic | INFO | Yes | Yes | Yes | Yes* |
+| T106 | duplicate-literal-assertion | INFO | Yes | Yes | Yes | Yes |
+| T107 | assertion-roulette | WARN | Yes | -- | Yes | Yes |
+| T108 | wait-and-see | WARN | Yes | Yes | Yes | Yes |
+| T109 | undescriptive-test-name | INFO | Yes | Yes | Yes | Yes |
 
 \* Notes:
-- Rust T101: token_tree limitation — private field access in macros not detectable.
-- Rust T105: token_tree limitation — relational operators in `assert!()` not detectable.
+- Rust T101: token_tree limitation -- private field access in macros not detectable.
+- Rust T105: token_tree limitation -- relational operators in `assert!()` not detectable.
 - PHP T102: `#[DataProvider]` params excluded from fixture count (#20).
-- Rust T102: Smart fixture detection — constructor/struct/macro counted, method calls on locals excluded (#21).
-- Rust T103: `.is_err()` removed as weak proxy — only `#[should_panic]` and `.unwrap_err()` (#22).
+- Rust T102: Smart fixture detection -- constructor/struct/macro counted, method calls on locals excluded (#21).
+- Rust T103: `.is_err()` removed as weak proxy -- only `#[should_panic]` and `.unwrap_err()` (#22).
+- T107: TypeScript skipped -- Jest/Vitest expect() has no message argument.
+- T104: Deprecated and removed in Phase 5.5 (replaced by T106).
 
 ## Quality Metrics
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 471 passing | -- |
+| Tests | 516 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 

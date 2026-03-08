@@ -79,6 +79,7 @@ pub struct Config {
     pub parameterized_min_ratio: f64,
     pub fixture_max: usize,
     pub min_assertions_for_t105: usize,
+    pub min_duplicate_count: usize,
     pub disabled_rules: Vec<RuleId>,
 }
 
@@ -91,6 +92,7 @@ impl Default for Config {
             parameterized_min_ratio: 0.1,
             fixture_max: 5,
             min_assertions_for_t105: 5,
+            min_duplicate_count: 3,
             disabled_rules: Vec::new(),
         }
     }
@@ -177,17 +179,69 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
             });
         }
 
-        // T104: hardcoded-only
-        if !is_disabled(config, "T104")
-            && !is_suppressed(analysis, "T104")
-            && analysis.hardcoded_only
+        // T108: wait-and-see
+        if !is_disabled(config, "T108") && !is_suppressed(analysis, "T108") && analysis.has_wait {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T108"),
+                severity: Severity::Warn,
+                file: func.file.clone(),
+                line: Some(func.line),
+                message: "wait-and-see: test uses sleep/delay (causes flaky tests, consider async/mock alternatives)".to_string(),
+                details: None,
+            });
+        }
+
+        // T106: duplicate-literal-assertion
+        if !is_disabled(config, "T106")
+            && !is_suppressed(analysis, "T106")
+            && analysis.duplicate_literal_count >= config.min_duplicate_count
         {
             diagnostics.push(Diagnostic {
-                rule: RuleId::new("T104"),
+                rule: RuleId::new("T106"),
                 severity: Severity::Info,
                 file: func.file.clone(),
                 line: Some(func.line),
-                message: "hardcoded-only: all assertion values are literals".to_string(),
+                message: format!(
+                    "duplicate-literal-assertion: literal appears {} times in assertions (consider extracting to constant or parameter)",
+                    analysis.duplicate_literal_count,
+                ),
+                details: None,
+            });
+        }
+
+        // T107: assertion-roulette
+        if !is_disabled(config, "T107")
+            && !is_suppressed(analysis, "T107")
+            && analysis.assertion_count >= 2
+            && analysis.assertion_message_count == 0
+        {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T107"),
+                severity: Severity::Warn,
+                file: func.file.clone(),
+                line: Some(func.line),
+                message: format!(
+                    "assertion-roulette: {} assertions without messages (add failure messages for readability)",
+                    analysis.assertion_count,
+                ),
+                details: None,
+            });
+        }
+
+        // T109: undescriptive-test-name
+        if !is_disabled(config, "T109")
+            && !is_suppressed(analysis, "T109")
+            && is_undescriptive_test_name(&func.name)
+        {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T109"),
+                severity: Severity::Info,
+                file: func.file.clone(),
+                line: Some(func.line),
+                message: format!(
+                    "undescriptive-test-name: \"{}\" does not describe behavior (use descriptive names like \"test_user_creation_returns_valid_id\")",
+                    func.name,
+                ),
                 details: None,
             });
         }
@@ -364,6 +418,61 @@ pub fn evaluate_project_rules(
     }
 
     diagnostics
+}
+
+/// Blacklist of generic test name suffixes (after stripping test_ prefix).
+const GENERIC_TEST_NAMES: &[&str] = &[
+    "case", "example", "sample", "basic", "data", "check", "func", "method",
+];
+
+/// Check if a test name is undescriptive.
+///
+/// Violation patterns:
+/// - `test_` + digits only: `test_1`, `test_123`
+/// - `test` + digits only (camelCase): `test1`, `testCase1`
+/// - `test_` + single short word (4 chars or less): `test_it`, `test_foo`
+/// - Generic blacklist: `test_case`, `test_example`, etc.
+/// - Short string names (TypeScript): `"test 1"`, `"works"`, `"it"`
+pub fn is_undescriptive_test_name(name: &str) -> bool {
+    // Handle TypeScript string-style test names (may contain spaces)
+    let trimmed = name.trim_matches(|c: char| c == '"' || c == '\'');
+    let normalized = if trimmed != name {
+        // String-style name: normalize spaces to underscores for uniform checks
+        trimmed.to_lowercase().replace(' ', "_")
+    } else {
+        name.to_lowercase()
+    };
+
+    // Strip test_ or test prefix
+    let suffix = if let Some(s) = normalized.strip_prefix("test_") {
+        s
+    } else if let Some(s) = normalized.strip_prefix("test") {
+        if s.is_empty() {
+            return true; // just "test"
+        }
+        s
+    } else {
+        // No test prefix - check if the whole name is very short/generic
+        // e.g. TypeScript `it('works', ...)` -> name="works"
+        // Single word or very short: undescriptive
+        let is_single_word = !normalized.contains('_') && !normalized.contains(' ');
+        return is_single_word || GENERIC_TEST_NAMES.contains(&normalized.as_str());
+    };
+
+    // Digits only after prefix
+    if suffix.chars().all(|c| c.is_ascii_digit() || c == '_')
+        && suffix.chars().any(|c| c.is_ascii_digit())
+    {
+        return true;
+    }
+
+    // Single short word (4 chars or less, no underscores = single word)
+    if !suffix.contains('_') && suffix.len() <= 4 {
+        return true;
+    }
+
+    // Generic blacklist
+    GENERIC_TEST_NAMES.contains(&suffix)
 }
 
 fn is_disabled(config: &Config, rule_id: &str) -> bool {
@@ -677,7 +786,7 @@ mod tests {
     #[test]
     fn t102_fixture_count_at_threshold_no_diagnostic() {
         let funcs = vec![make_func(
-            "test_ok",
+            "test_fixtures_at_threshold",
             TestAnalysis {
                 assertion_count: 1,
                 fixture_count: 5, // exactly at threshold, strict >
@@ -759,7 +868,7 @@ mod tests {
     #[test]
     fn multiple_violations_reported() {
         let funcs = vec![make_func(
-            "test_bad",
+            "test_assertion_free_and_giant",
             TestAnalysis {
                 assertion_count: 0,
                 line_count: 73,
@@ -1114,89 +1223,6 @@ mod tests {
         assert!(!diags.iter().any(|d| d.rule.0 == "T103"));
     }
 
-    // --- T104: hardcoded-only ---
-
-    #[test]
-    fn t104_hardcoded_only_produces_info() {
-        let funcs = vec![make_func(
-            "test_add",
-            TestAnalysis {
-                assertion_count: 1,
-                hardcoded_only: true,
-                ..Default::default()
-            },
-        )];
-        let diags = evaluate_rules(&funcs, &Config::default());
-        assert_eq!(diags.len(), 1);
-        assert_eq!(diags[0].rule, RuleId::new("T104"));
-        assert_eq!(diags[0].severity, Severity::Info);
-    }
-
-    #[test]
-    fn t104_not_hardcoded_no_diagnostic() {
-        let funcs = vec![make_func(
-            "test_add",
-            TestAnalysis {
-                assertion_count: 1,
-                hardcoded_only: false,
-                ..Default::default()
-            },
-        )];
-        let diags = evaluate_rules(&funcs, &Config::default());
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn t104_disabled_no_diagnostic() {
-        let funcs = vec![make_func(
-            "test_add",
-            TestAnalysis {
-                assertion_count: 1,
-                hardcoded_only: true,
-                ..Default::default()
-            },
-        )];
-        let config = Config {
-            disabled_rules: vec![RuleId::new("T104")],
-            ..Config::default()
-        };
-        let diags = evaluate_rules(&funcs, &config);
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn t104_suppressed_no_diagnostic() {
-        let funcs = vec![make_func(
-            "test_add",
-            TestAnalysis {
-                assertion_count: 1,
-                hardcoded_only: true,
-                suppressed_rules: vec![RuleId::new("T104")],
-                ..Default::default()
-            },
-        )];
-        let diags = evaluate_rules(&funcs, &Config::default());
-        assert!(diags.is_empty());
-    }
-
-    #[test]
-    fn t104_t101_interaction_both_emitted() {
-        let funcs = vec![make_func(
-            "test_mock_and_hardcoded",
-            TestAnalysis {
-                assertion_count: 1,
-                hardcoded_only: true,
-                how_not_what_count: 1,
-                ..Default::default()
-            },
-        )];
-        let diags = evaluate_rules(&funcs, &Config::default());
-        assert_eq!(diags.len(), 2);
-        let rules: Vec<&str> = diags.iter().map(|d| d.rule.0.as_str()).collect();
-        assert!(rules.contains(&"T104"), "T104 should be emitted");
-        assert!(rules.contains(&"T101"), "T101 should be emitted");
-    }
-
     // --- T105: deterministic-no-metamorphic ---
 
     #[test]
@@ -1354,5 +1380,405 @@ mod tests {
         };
         let diags = evaluate_project_rules(5, 10, &config);
         assert!(diags.is_empty());
+    }
+
+    // --- T108: wait-and-see ---
+
+    #[test]
+    fn t108_has_wait_produces_warn() {
+        let funcs = vec![make_func(
+            "test_sleepy",
+            TestAnalysis {
+                assertion_count: 1,
+                has_wait: true,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t108: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T108"))
+            .collect();
+        assert_eq!(t108.len(), 1);
+        assert_eq!(t108[0].severity, Severity::Warn);
+        assert!(t108[0].message.contains("wait-and-see"));
+    }
+
+    #[test]
+    fn t108_no_wait_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_fast",
+            TestAnalysis {
+                assertion_count: 1,
+                has_wait: false,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t108: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T108"))
+            .collect();
+        assert!(t108.is_empty());
+    }
+
+    #[test]
+    fn t108_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_sleepy",
+            TestAnalysis {
+                assertion_count: 1,
+                has_wait: true,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T108")],
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t108: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T108"))
+            .collect();
+        assert!(t108.is_empty());
+    }
+
+    #[test]
+    fn t108_suppressed_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_sleepy",
+            TestAnalysis {
+                assertion_count: 1,
+                has_wait: true,
+                suppressed_rules: vec![RuleId::new("T108")],
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t108: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T108"))
+            .collect();
+        assert!(t108.is_empty());
+    }
+
+    // --- T109: undescriptive-test-name ---
+
+    #[test]
+    fn t109_is_undescriptive_digits_only() {
+        assert!(is_undescriptive_test_name("test_1"));
+        assert!(is_undescriptive_test_name("test_123"));
+        assert!(is_undescriptive_test_name("test1"));
+    }
+
+    #[test]
+    fn t109_is_undescriptive_short_word() {
+        assert!(is_undescriptive_test_name("test_it"));
+        assert!(is_undescriptive_test_name("test_foo"));
+        assert!(is_undescriptive_test_name("test_run"));
+        assert!(is_undescriptive_test_name("test_main"));
+    }
+
+    #[test]
+    fn t109_is_undescriptive_blacklist() {
+        assert!(is_undescriptive_test_name("test_case"));
+        assert!(is_undescriptive_test_name("test_example"));
+        assert!(is_undescriptive_test_name("test_sample"));
+        assert!(is_undescriptive_test_name("test_basic"));
+        assert!(is_undescriptive_test_name("test_data"));
+        assert!(is_undescriptive_test_name("test_check"));
+        assert!(is_undescriptive_test_name("test_func"));
+        assert!(is_undescriptive_test_name("test_method"));
+    }
+
+    #[test]
+    fn t109_is_undescriptive_just_test() {
+        assert!(is_undescriptive_test_name("test"));
+    }
+
+    #[test]
+    fn t109_is_descriptive_pass() {
+        assert!(!is_undescriptive_test_name(
+            "test_user_creation_returns_valid_id"
+        ));
+        assert!(!is_undescriptive_test_name("test_empty_input_raises_error"));
+        assert!(!is_undescriptive_test_name("test_calculate_total_price"));
+        assert!(!is_undescriptive_test_name("test_login"));
+    }
+
+    #[test]
+    fn t109_typescript_string_names() {
+        // Undescriptive
+        assert!(is_undescriptive_test_name("works"));
+        assert!(is_undescriptive_test_name("test"));
+        assert!(is_undescriptive_test_name("it"));
+        // Descriptive
+        assert!(!is_undescriptive_test_name(
+            "should calculate total price correctly"
+        ));
+        assert!(!is_undescriptive_test_name(
+            "returns valid user when given valid credentials"
+        ));
+    }
+
+    #[test]
+    fn t109_produces_info_diagnostic() {
+        let funcs = vec![make_func(
+            "test_1",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t109: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T109"))
+            .collect();
+        assert_eq!(t109.len(), 1);
+        assert_eq!(t109[0].severity, Severity::Info);
+        assert!(t109[0].message.contains("undescriptive-test-name"));
+    }
+
+    #[test]
+    fn t109_descriptive_name_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_user_creation_returns_valid_id",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t109: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T109"))
+            .collect();
+        assert!(t109.is_empty());
+    }
+
+    #[test]
+    fn t109_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_1",
+            TestAnalysis {
+                assertion_count: 1,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T109")],
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t109: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T109"))
+            .collect();
+        assert!(t109.is_empty());
+    }
+
+    // --- T107: assertion-roulette ---
+
+    #[test]
+    fn t107_multiple_assertions_no_messages_produces_warn() {
+        let funcs = vec![make_func(
+            "test_multiple_asserts_no_messages",
+            TestAnalysis {
+                assertion_count: 3,
+                assertion_message_count: 0,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert_eq!(t107.len(), 1);
+        assert_eq!(t107[0].severity, Severity::Warn);
+        assert!(t107[0].message.contains("assertion-roulette"));
+    }
+
+    #[test]
+    fn t107_single_assertion_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_single_assert_passes",
+            TestAnalysis {
+                assertion_count: 1,
+                assertion_message_count: 0,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert!(t107.is_empty());
+    }
+
+    #[test]
+    fn t107_assertions_with_messages_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_asserts_with_messages_pass",
+            TestAnalysis {
+                assertion_count: 3,
+                assertion_message_count: 3,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert!(t107.is_empty());
+    }
+
+    #[test]
+    fn t107_partial_messages_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_partial_messages_still_pass",
+            TestAnalysis {
+                assertion_count: 3,
+                assertion_message_count: 1, // at least some have messages
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert!(t107.is_empty(), "partial messages should not trigger T107");
+    }
+
+    #[test]
+    fn t107_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_multiple_asserts_disabled",
+            TestAnalysis {
+                assertion_count: 3,
+                assertion_message_count: 0,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T107")],
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert!(t107.is_empty());
+    }
+
+    // --- T106: duplicate-literal-assertion ---
+
+    #[test]
+    fn t106_duplicate_literal_produces_info() {
+        let funcs = vec![make_func(
+            "test_duplicate_literals",
+            TestAnalysis {
+                assertion_count: 4,
+                duplicate_literal_count: 4,
+                ..Default::default()
+            },
+        )];
+        let config = Config::default(); // min_duplicate_count = 3
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert_eq!(t106.len(), 1);
+        assert_eq!(t106[0].severity, Severity::Info);
+        assert!(t106[0].message.contains("duplicate-literal-assertion"));
+    }
+
+    #[test]
+    fn t106_below_threshold_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_few_duplicates",
+            TestAnalysis {
+                assertion_count: 3,
+                duplicate_literal_count: 2,
+                ..Default::default()
+            },
+        )];
+        let config = Config::default();
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert!(t106.is_empty());
+    }
+
+    #[test]
+    fn t106_at_threshold_produces_diagnostic() {
+        let funcs = vec![make_func(
+            "test_at_threshold",
+            TestAnalysis {
+                assertion_count: 3,
+                duplicate_literal_count: 3,
+                ..Default::default()
+            },
+        )];
+        let config = Config::default(); // min_duplicate_count = 3
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert_eq!(t106.len(), 1);
+    }
+
+    #[test]
+    fn t106_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_duplicate_literals",
+            TestAnalysis {
+                assertion_count: 4,
+                duplicate_literal_count: 4,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T106")],
+            ..Default::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert!(t106.is_empty());
+    }
+
+    #[test]
+    fn t106_custom_threshold() {
+        let funcs = vec![make_func(
+            "test_duplicate_literals",
+            TestAnalysis {
+                assertion_count: 4,
+                duplicate_literal_count: 4,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            min_duplicate_count: 5,
+            ..Default::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert!(t106.is_empty(), "count=4 with threshold=5 should not fire");
     }
 }

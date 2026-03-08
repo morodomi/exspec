@@ -213,14 +213,29 @@ const RULE_REGISTRY: &[RuleMeta] = &[
         short_description: "No error/exception test found in file",
     },
     RuleMeta {
-        id: "T104",
-        name: "hardcoded-only",
-        short_description: "All assertion values are hardcoded literals",
-    },
-    RuleMeta {
         id: "T105",
         name: "deterministic-no-metamorphic",
         short_description: "All assertions use exact equality, no relational checks",
+    },
+    RuleMeta {
+        id: "T106",
+        name: "duplicate-literal-assertion",
+        short_description: "Same literal appears multiple times in assertions",
+    },
+    RuleMeta {
+        id: "T107",
+        name: "assertion-roulette",
+        short_description: "Multiple assertions without failure messages",
+    },
+    RuleMeta {
+        id: "T108",
+        name: "wait-and-see",
+        short_description: "Test uses sleep/delay causing flaky tests",
+    },
+    RuleMeta {
+        id: "T109",
+        name: "undescriptive-test-name",
+        short_description: "Test name does not describe behavior",
     },
 ];
 
@@ -718,7 +733,7 @@ mod tests {
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
-        assert_eq!(rules.len(), 13);
+        assert_eq!(rules.len(), 16);
     }
 
     #[test]
