@@ -1266,6 +1266,41 @@ describe('d', () => {
         );
     }
 
+    // --- T001 FP fix: expect modifier chains .not/.resolves (#37) ---
+
+    #[test]
+    fn t001_not_modifier_all_detected() {
+        // TC-01..03: expect(x).not.toBe/toEqual/toContain -> assertion_count == 1 each
+        let source = fixture("t001_not_modifier.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_not_modifier.test.ts");
+        assert_eq!(funcs.len(), 3);
+        for f in &funcs {
+            assert_eq!(
+                f.analysis.assertion_count, 1,
+                "test '{}' with .not modifier should have assertion_count == 1, got {}",
+                f.name, f.analysis.assertion_count
+            );
+        }
+    }
+
+    #[test]
+    fn t001_resolves_rejects_chain_all_detected() {
+        // TC-04..06: resolves.toBe, resolves.not.toThrow, rejects.not.toThrow -> assertion_count == 1 each
+        let source = fixture("t001_resolves_rejects_chain.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs =
+            extractor.extract_test_functions(&source, "t001_resolves_rejects_chain.test.ts");
+        assert_eq!(funcs.len(), 3);
+        for f in &funcs {
+            assert_eq!(
+                f.analysis.assertion_count, 1,
+                "test '{}' with modifier chain should have assertion_count == 1, got {}",
+                f.name, f.analysis.assertion_count
+            );
+        }
+    }
+
     #[test]
     fn t107_skipped_for_typescript() {
         // TypeScript expect() has no message argument, so T107 should never fire.

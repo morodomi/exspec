@@ -5,8 +5,9 @@
       function: (identifier) @fn
       (#match? @fn "^expect$")))) @assertion
 
-;; Match expect(...).rejects.toThrow(...) — chained rejects pattern
-;; (also matched in error_test.scm for T103)
+;; Match expect(...).not/resolves/rejects.toX(...) — modifier chain (depth-2)
+;; The outer call_expression constrains the called member to .toX(...).
+;; (rejects also matched in error_test.scm for T103)
 (call_expression
   function: (member_expression
     object: (member_expression
@@ -14,7 +15,25 @@
         function: (identifier) @_fn2
         (#match? @_fn2 "^expect$"))
       property: (property_identifier) @_prop
-      (#eq? @_prop "rejects")))) @assertion
+      (#match? @_prop "^(not|resolves|rejects)$")))) @assertion
+
+;; Match expect(...).modifier.modifier.toX(...) — two-modifier chain (depth-3)
+;; e.g., expect(p).resolves.not.toThrow(), expect(p).rejects.not.toBe(...)
+;; For simplicity, accepts any combination of not|resolves|rejects modifiers.
+;; Terminal matcher constraint (^to[A-Z]) follows Jest/Vitest naming convention.
+(call_expression
+  function: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (call_expression
+          function: (identifier) @_fn_d3
+          (#match? @_fn_d3 "^expect$"))
+        property: (property_identifier) @_prop_d3a
+        (#match? @_prop_d3a "^(not|resolves|rejects)$"))
+      property: (property_identifier) @_prop_d3b
+      (#match? @_prop_d3b "^(not|resolves|rejects)$"))
+    property: (property_identifier) @_matcher_d3
+    (#match? @_matcher_d3 "^to[A-Z]"))) @assertion
 
 ;; Match expectTypeOf(...).toEqualTypeOf<T>() and similar
 (call_expression
