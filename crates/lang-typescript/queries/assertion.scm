@@ -35,12 +35,25 @@
     property: (property_identifier) @_matcher_d3
     (#match? @_matcher_d3 "^to[A-Z]"))) @assertion
 
-;; Match expectTypeOf(...).toEqualTypeOf<T>() and similar
+;; Match expectTypeOf(...).toEqualTypeOf<T>() and similar (chained method call)
 (call_expression
   function: (member_expression
     object: (call_expression
       function: (identifier) @_fn3
       (#eq? @_fn3 "expectTypeOf")))) @assertion
+
+;; Match standalone expectType<T>(value) without chained method call
+(call_expression
+  function: (identifier) @_fn_et
+  (#eq? @_fn_et "expectType")) @assertion
+
+;; Match expect.assertions(N), expect.hasAssertions(), expect.unreachable()
+(call_expression
+  function: (member_expression
+    object: (identifier) @_fn_assert
+    property: (property_identifier) @_prop_assert
+    (#eq? @_fn_assert "expect")
+    (#match? @_prop_assert "^(assertions|hasAssertions|unreachable)$"))) @assertion
 
 ;; Match expect.soft(...).toX(), expect.element(...).toX(), expect.poll(...).toX()
 (call_expression

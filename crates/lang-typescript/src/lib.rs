@@ -1345,4 +1345,71 @@ describe('d', () => {
             "only 'has no assertion' test should trigger T001"
         );
     }
+
+    // --- T001 FP fix: expect.assertions / expect.unreachable / expectType (#39) ---
+
+    #[test]
+    fn t001_expect_assertions_counts_as_assertion() {
+        // TC-01: expect.assertions(1) -> T001 should NOT fire
+        let source = fixture("t001_expect_assertions.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_assertions.test.ts");
+        // 8 test functions in fixture
+        assert_eq!(funcs.len(), 8);
+
+        // TC-01: expect.assertions(1) + expect(data).toBeDefined()
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "expect.assertions(N) should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+
+        // TC-02: expect.assertions(0) — single oracle, exact count catches double-counting
+        assert_eq!(
+            funcs[1].analysis.assertion_count, 1,
+            "expect.assertions(0) should count as exactly 1 assertion, got {}",
+            funcs[1].analysis.assertion_count
+        );
+
+        // TC-03: expect.hasAssertions() + expect(data).toBeTruthy()
+        assert!(
+            funcs[2].analysis.assertion_count >= 1,
+            "expect.hasAssertions() should count as assertion, got {}",
+            funcs[2].analysis.assertion_count
+        );
+
+        // TC-04: expect.unreachable() — single oracle, exact count catches double-counting
+        assert_eq!(
+            funcs[3].analysis.assertion_count, 1,
+            "expect.unreachable() should count as exactly 1 assertion, got {}",
+            funcs[3].analysis.assertion_count
+        );
+
+        // TC-05: expectType<User>(user) — single oracle, exact count catches double-counting
+        assert_eq!(
+            funcs[4].analysis.assertion_count, 1,
+            "expectType<T>(value) should count as exactly 1 assertion, got {}",
+            funcs[4].analysis.assertion_count
+        );
+
+        // TC-06: expect.assertions(2) + expect(a).toBe(1) + expect(b).toBe(2) -> 3+
+        assert!(
+            funcs[5].analysis.assertion_count >= 2,
+            "mixed expect.assertions + expect().toBe() should count 2+, got {}",
+            funcs[5].analysis.assertion_count
+        );
+
+        // TC-07: expectType + expectTypeOf -> both counted
+        assert!(
+            funcs[6].analysis.assertion_count >= 2,
+            "expectType + expectTypeOf should count 2+, got {}",
+            funcs[6].analysis.assertion_count
+        );
+
+        // TC-08: no assertions -> BLOCK (regression guard)
+        assert_eq!(
+            funcs[7].analysis.assertion_count, 0,
+            "no-assertion test should have assertion_count == 0"
+        );
+    }
 }
