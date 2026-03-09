@@ -37,6 +37,22 @@
   name: (name) @_smethod
   (#match? @_smethod "^assert([A-Z_]|$)")) @assertion
 
+; Named-class static: Assert::assertEquals(), SomeAssert::assertTrue(), etc.
+; Matches scoped_call_expression where scope is a simple name ending with "Assert" (or exact "Assert").
+(scoped_call_expression
+  scope: (name) @_cls
+  name: (name) @_sm
+  (#match? @_cls "Assert$")
+  (#match? @_sm "^assert([A-Z_]|$)")) @assertion
+
+; FQCN static: PHPUnit\Framework\Assert::assertSame(), etc.
+; In tree-sitter-php, fully qualified class names use qualified_name node.
+(scoped_call_expression
+  scope: (qualified_name) @_qcls
+  name: (name) @_qm
+  (#match? @_qcls "Assert$")
+  (#match? @_qm "^assert([A-Z_]|$)")) @assertion
+
 ; Mockery: ->shouldReceive(...) — sets mock expectation (verified at teardown)
 (member_call_expression
   name: (name) @_m1 (#eq? @_m1 "shouldReceive")) @assertion
@@ -49,9 +65,14 @@
 (member_call_expression
   name: (name) @_m3 (#eq? @_m3 "shouldNotHaveReceived")) @assertion
 
-; PHPUnit mock: ->expects(...) — mock expectation
+; PHPUnit mock: $this->expects(...) — mock expectation (constrained to $this only)
+; $mock->expects() and other non-$this calls are NOT counted as assertions,
+; because ->expects() is a common method name that may not be a test oracle.
 (member_call_expression
-  name: (name) @_e (#eq? @_e "expects")) @assertion
+  object: (variable_name (name) @_exp_this)
+  name: (name) @_e
+  (#eq? @_exp_this "this")
+  (#eq? @_e "expects")) @assertion
 
 ; Pest: expect(...)->toBe(...) and similar
 (member_call_expression

@@ -614,15 +614,15 @@ mod tests {
     }
 
     #[test]
-    fn t001_phpunit_expects_counts_as_assertion() {
-        // TC-04: $mock->expects($this->once())->method('x') -> assertion_count >= 1
-        let source = fixture("t001_pass_phpunit_mock.php");
+    fn t001_phpunit_mock_expects_not_this_not_counted() {
+        // $mock->expects() is NOT counted as assertion (only $this->expects() is)
+        let source = fixture("t001_violation_phpunit_mock.php");
         let extractor = PhpExtractor::new();
-        let funcs = extractor.extract_test_functions(&source, "t001_pass_phpunit_mock.php");
+        let funcs = extractor.extract_test_functions(&source, "t001_violation_phpunit_mock.php");
         assert_eq!(funcs.len(), 1);
-        assert!(
-            funcs[0].analysis.assertion_count >= 1,
-            "expects() should count as assertion, got {}",
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 0,
+            "$mock->expects() should NOT count as assertion, got {}",
             funcs[0].analysis.assertion_count
         );
     }
@@ -1534,6 +1534,88 @@ mod tests {
         assert!(
             f.analysis.assertion_count >= 1,
             "expectsNoOutput() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_named_class_assert_equals() {
+        let source = fixture("t001_pass_named_class_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_named_class_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_assert_class_equals")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Assert::assertEquals() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_fqcn_assert_same() {
+        let source = fixture("t001_pass_named_class_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_named_class_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_fqcn_assert_same")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "PHPUnit\\Framework\\Assert::assertSame() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_named_class_assert_true() {
+        let source = fixture("t001_pass_named_class_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_named_class_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_assert_class_true")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Assert::assertTrue() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_non_this_expects_not_counted() {
+        let source = fixture("t001_violation_non_this_expects.php");
+        let extractor = PhpExtractor::new();
+        let funcs =
+            extractor.extract_test_functions(&source, "t001_violation_non_this_expects.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_event_emitter_expects_not_assertion")
+            .unwrap();
+        assert_eq!(
+            f.analysis.assertion_count, 0,
+            "$emitter->expects() should NOT count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_mock_expects_not_this_not_counted() {
+        let source = fixture("t001_violation_non_this_expects.php");
+        let extractor = PhpExtractor::new();
+        let funcs =
+            extractor.extract_test_functions(&source, "t001_violation_non_this_expects.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_mock_expects_not_this")
+            .unwrap();
+        assert_eq!(
+            f.analysis.assertion_count, 0,
+            "$mock->expects() should NOT count as assertion, got {}",
             f.analysis.assertion_count
         );
     }
