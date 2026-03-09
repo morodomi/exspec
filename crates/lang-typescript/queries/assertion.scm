@@ -65,6 +65,39 @@
         (#eq? @_fn4 "expect")
         (#match? @_prop4 "^(soft|element|poll)$"))))) @assertion
 
+;; expect.soft/element/poll depth-3: expect.soft(x).not.toBe(y)
+(call_expression
+  function: (member_expression
+    object: (member_expression
+      object: (call_expression
+        function: (member_expression
+          object: (identifier) @_fn_sep3
+          property: (property_identifier) @_prop_sep3
+          (#eq? @_fn_sep3 "expect")
+          (#match? @_prop_sep3 "^(soft|element|poll)$")))
+      property: (property_identifier) @_mod_sep3
+      (#match? @_mod_sep3 "^(not|resolves|rejects)$"))
+    property: (property_identifier) @_term_sep3
+    (#match? @_term_sep3 "^to[A-Z]"))) @assertion
+
+;; expect.soft/element/poll depth-4: expect.soft(x).resolves.not.toBe(y)
+(call_expression
+  function: (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (call_expression
+          function: (member_expression
+            object: (identifier) @_fn_sep4
+            property: (property_identifier) @_prop_sep4
+            (#eq? @_fn_sep4 "expect")
+            (#match? @_prop_sep4 "^(soft|element|poll)$")))
+        property: (property_identifier) @_mod_sep4a
+        (#match? @_mod_sep4a "^(not|resolves|rejects)$"))
+      property: (property_identifier) @_mod_sep4b
+      (#match? @_mod_sep4b "^(not|resolves|rejects)$"))
+    property: (property_identifier) @_term_sep4
+    (#match? @_term_sep4 "^to[A-Z]"))) @assertion
+
 ;; Chai BDD property-style assertions (no trailing parentheses).
 ;; Terminal property allowlist: ok|true|false|null|undefined|exist|exists|empty|NaN|
 ;;   extensible|sealed|frozen|arguments|Arguments|finite|
@@ -78,7 +111,7 @@
       function: (identifier) @_chai1
       (#match? @_chai1 "^expect$"))
     property: (property_identifier) @_term1
-    (#match? @_term1 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled)$"))) @assertion
+    (#match? @_term1 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned)$"))) @assertion
 
 ;; Depth 2: expect(x).chain.TERMINAL
 (expression_statement
@@ -88,7 +121,7 @@
         function: (identifier) @_chai2
         (#match? @_chai2 "^expect$")))
     property: (property_identifier) @_term2
-    (#match? @_term2 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled)$"))) @assertion
+    (#match? @_term2 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned)$"))) @assertion
 
 ;; Depth 3: expect(x).a.b.TERMINAL
 (expression_statement
@@ -99,7 +132,7 @@
           function: (identifier) @_chai3
           (#match? @_chai3 "^expect$"))))
     property: (property_identifier) @_term3
-    (#match? @_term3 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled)$"))) @assertion
+    (#match? @_term3 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned)$"))) @assertion
 
 ;; Depth 4: expect(x).a.b.c.TERMINAL
 (expression_statement
@@ -111,7 +144,7 @@
             function: (identifier) @_chai4
             (#match? @_chai4 "^expect$")))))
     property: (property_identifier) @_term4
-    (#match? @_term4 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled)$"))) @assertion
+    (#match? @_term4 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned)$"))) @assertion
 
 ;; Depth 5: expect(x).a.b.c.d.TERMINAL (e.g., .to.not.have.been.calledOnce)
 (expression_statement
@@ -124,17 +157,18 @@
               function: (identifier) @_chai5
               (#match? @_chai5 "^expect$"))))))
     property: (property_identifier) @_term5
-    (#match? @_term5 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled)$"))) @assertion
+    (#match? @_term5 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned)$"))) @assertion
 
 ;; Chai BDD method-call chain assertions (with trailing parentheses).
 ;; These patterns are kept separate from the existing Jest/Vitest modifier-chain
 ;; patterns to avoid double-counting while covering common Chai/Sinon-Chai method
 ;; terminals found during dogfooding.
 ;; Terminal methods use a bounded, dogfooding-driven initial vocabulary.
-;; Intermediate chain words: to|be|been|have (depth-2), +not (depth-3+).
+;; Intermediate chain words: to|be|been|have|deep|nested|own|ordered|any|all|itself (depth-2),
+;; +not (depth-3+).
 
 ;; Chai depth-2: expect(x).CHAIN.METHOD(args)
-;; e.g., expect(x).to.equal(y)
+;; e.g., expect(x).to.equal(y), expect(obj).itself.respondTo('bar')
 ;; `not` is excluded at depth-2 to avoid overlap with the existing modifier-chain
 ;; pattern for expect(x).not.<method>().
 (call_expression
@@ -144,7 +178,7 @@
         function: (identifier) @_chai_mc2
         (#match? @_chai_mc2 "^expect$"))
       property: (property_identifier) @_chai_mc2_chain
-      (#match? @_chai_mc2_chain "^(to|be|been|have)$"))
+      (#match? @_chai_mc2_chain "^(to|be|been|have|deep|nested|own|ordered|any|all|itself)$"))
     property: (property_identifier) @_chai_mc2_term
     (#match? @_chai_mc2_term "^(equal|eql|a|an|include|contain|throw|match|property|keys|lengthOf|members|satisfy|closeTo|above|below|least|most|within|instanceOf|respondTo|oneOf|change|increase|decrease|by|string|calledWith|calledOnceWith|calledWithExactly|calledOn|callCount|returned|thrown)$"))) @assertion
 
@@ -158,9 +192,9 @@
           function: (identifier) @_chai_mc3
           (#match? @_chai_mc3 "^expect$"))
         property: (property_identifier) @_chai_mc3_chain1
-        (#match? @_chai_mc3_chain1 "^(to|be|been|have|not)$"))
+        (#match? @_chai_mc3_chain1 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
       property: (property_identifier) @_chai_mc3_chain2
-      (#match? @_chai_mc3_chain2 "^(to|be|been|have|not)$"))
+      (#match? @_chai_mc3_chain2 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
     property: (property_identifier) @_chai_mc3_term
     (#match? @_chai_mc3_term "^(equal|eql|a|an|include|contain|throw|match|property|keys|lengthOf|members|satisfy|closeTo|above|below|least|most|within|instanceOf|respondTo|oneOf|change|increase|decrease|by|string|calledWith|calledOnceWith|calledWithExactly|calledOn|callCount|returned|thrown)$"))) @assertion
 
@@ -175,11 +209,11 @@
             function: (identifier) @_chai_mc4
             (#match? @_chai_mc4 "^expect$"))
           property: (property_identifier) @_chai_mc4_chain1
-          (#match? @_chai_mc4_chain1 "^(to|be|been|have|not)$"))
+          (#match? @_chai_mc4_chain1 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
         property: (property_identifier) @_chai_mc4_chain2
-        (#match? @_chai_mc4_chain2 "^(to|be|been|have|not)$"))
+        (#match? @_chai_mc4_chain2 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
       property: (property_identifier) @_chai_mc4_chain3
-      (#match? @_chai_mc4_chain3 "^(to|be|been|have|not)$"))
+      (#match? @_chai_mc4_chain3 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
     property: (property_identifier) @_chai_mc4_term
     (#match? @_chai_mc4_term "^(equal|eql|a|an|include|contain|throw|match|property|keys|lengthOf|members|satisfy|closeTo|above|below|least|most|within|instanceOf|respondTo|oneOf|change|increase|decrease|by|string|calledWith|calledOnceWith|calledWithExactly|calledOn|callCount|returned|thrown)$"))) @assertion
 
@@ -195,13 +229,13 @@
               function: (identifier) @_chai_mc5
               (#match? @_chai_mc5 "^expect$"))
             property: (property_identifier) @_chai_mc5_chain1
-            (#match? @_chai_mc5_chain1 "^(to|be|been|have|not)$"))
+            (#match? @_chai_mc5_chain1 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
           property: (property_identifier) @_chai_mc5_chain2
-          (#match? @_chai_mc5_chain2 "^(to|be|been|have|not)$"))
+          (#match? @_chai_mc5_chain2 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
         property: (property_identifier) @_chai_mc5_chain3
-        (#match? @_chai_mc5_chain3 "^(to|be|been|have|not)$"))
+        (#match? @_chai_mc5_chain3 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
       property: (property_identifier) @_chai_mc5_chain4
-      (#match? @_chai_mc5_chain4 "^(to|be|been|have|not)$"))
+      (#match? @_chai_mc5_chain4 "^(to|be|been|have|not|deep|nested|own|ordered|any|all|itself)$"))
     property: (property_identifier) @_chai_mc5_term
     (#match? @_chai_mc5_term "^(equal|eql|a|an|include|contain|throw|match|property|keys|lengthOf|members|satisfy|closeTo|above|below|least|most|within|instanceOf|respondTo|oneOf|change|increase|decrease|by|string|calledWith|calledOnceWith|calledWithExactly|calledOn|callCount|returned|thrown)$"))) @assertion
 

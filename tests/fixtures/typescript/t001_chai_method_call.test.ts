@@ -55,4 +55,44 @@ describe('chai method-call chain assertions', () => {
   it('should detect not.to.equal (depth 3)', () => {
     expect(value).not.to.equal(42);
   });
+
+  // TC-11 (regression): expect(x).to.equal(y) — exact count 1
+  it('should count to.equal exactly once', () => {
+    expect(value).to.equal(42);
+  });
+
+  // TC-12: expect(obj).to.have.deep.equal({a:1}) — deep intermediate
+  it('should detect deep intermediate (depth 4)', () => {
+    expect(obj).to.have.deep.equal({a: 1});
+  });
+
+  // TC-13: expect(obj).to.have.nested.property('a.b') — nested intermediate
+  it('should detect nested intermediate (depth 4)', () => {
+    expect(obj).to.have.nested.property('a.b');
+  });
+
+  // TC-14: expect(obj).to.have.own.property('x') — own intermediate
+  it('should detect own intermediate (depth 4)', () => {
+    expect(obj).to.have.own.property('x');
+  });
+
+  // TC-15: expect(arr).to.have.ordered.members([1,2]) — ordered intermediate
+  it('should detect ordered intermediate (depth 4)', () => {
+    expect(arr).to.have.ordered.members([1, 2]);
+  });
+
+  // TC-16: expect(obj).to.have.any.keys('x') — any intermediate
+  it('should detect any intermediate (depth 4)', () => {
+    expect(obj).to.have.any.keys('x');
+  });
+
+  // TC-17: expect(obj).to.have.all.keys('x','y') — all intermediate
+  it('should detect all intermediate (depth 4)', () => {
+    expect(obj).to.have.all.keys('x', 'y');
+  });
+
+  // TC-18: expect(obj).itself.to.respondTo('bar') — itself intermediate
+  it('should detect itself intermediate (depth 3)', () => {
+    expect(obj).itself.to.respondTo('bar');
+  });
 });

@@ -24,4 +24,9 @@ describe('chai property assertions', () => {
   it('should detect to.not.be.empty (depth 4)', () => {
     expect(list).to.not.be.empty;
   });
+
+  // TC-P6: expect(spy).to.have.returned — Sinon-Chai property terminal
+  it('should detect to.have.returned (depth 4)', () => {
+    expect(spy).to.have.returned;
+  });
 });

@@ -1166,11 +1166,11 @@ mod tests {
 
     #[test]
     fn t001_chai_property_fixture_all_detected() {
-        // TC-01: All 5 test functions in chai property fixture should have assertions
+        // All 6 test functions in chai property fixture should have assertions
         let source = fixture("t001_chai_property.test.ts");
         let extractor = TypeScriptExtractor::new();
         let funcs = extractor.extract_test_functions(&source, "t001_chai_property.test.ts");
-        assert_eq!(funcs.len(), 5);
+        assert_eq!(funcs.len(), 6);
         for f in &funcs {
             assert!(
                 f.analysis.assertion_count >= 1,
@@ -1305,11 +1305,11 @@ describe('d', () => {
 
     #[test]
     fn t001_chai_method_call_fixture_all_detected() {
-        // TC-01~07 should have assertions, TC-08~09 should not
+        // TC-01~07 should have assertions, TC-08~09 should not, TC-10~18 should have assertions
         let source = fixture("t001_chai_method_call.test.ts");
         let extractor = TypeScriptExtractor::new();
         let funcs = extractor.extract_test_functions(&source, "t001_chai_method_call.test.ts");
-        assert_eq!(funcs.len(), 10);
+        assert_eq!(funcs.len(), 18);
 
         // TC-01: expect(x).to.equal(y) — depth 2, exactly 1 (no double-count)
         assert_eq!(
@@ -1380,6 +1380,62 @@ describe('d', () => {
             "TC-10 not.to.equal should have assertion_count >= 1, got {}",
             funcs[9].analysis.assertion_count
         );
+
+        // TC-11 (regression): expect(x).to.equal(y) — exact count 1
+        assert_eq!(
+            funcs[10].analysis.assertion_count, 1,
+            "TC-11 to.equal regression should count exactly 1, got {}",
+            funcs[10].analysis.assertion_count
+        );
+
+        // TC-12: expect(obj).to.have.deep.equal({a:1}) — deep intermediate
+        assert!(
+            funcs[11].analysis.assertion_count >= 1,
+            "TC-12 deep intermediate should have assertion_count >= 1, got {}",
+            funcs[11].analysis.assertion_count
+        );
+
+        // TC-13: expect(obj).to.have.nested.property('a.b') — nested intermediate
+        assert!(
+            funcs[12].analysis.assertion_count >= 1,
+            "TC-13 nested intermediate should have assertion_count >= 1, got {}",
+            funcs[12].analysis.assertion_count
+        );
+
+        // TC-14: expect(obj).to.have.own.property('x') — own intermediate
+        assert!(
+            funcs[13].analysis.assertion_count >= 1,
+            "TC-14 own intermediate should have assertion_count >= 1, got {}",
+            funcs[13].analysis.assertion_count
+        );
+
+        // TC-15: expect(arr).to.have.ordered.members([1,2]) — ordered intermediate
+        assert!(
+            funcs[14].analysis.assertion_count >= 1,
+            "TC-15 ordered intermediate should have assertion_count >= 1, got {}",
+            funcs[14].analysis.assertion_count
+        );
+
+        // TC-16: expect(obj).to.have.any.keys('x') — any intermediate
+        assert!(
+            funcs[15].analysis.assertion_count >= 1,
+            "TC-16 any intermediate should have assertion_count >= 1, got {}",
+            funcs[15].analysis.assertion_count
+        );
+
+        // TC-17: expect(obj).to.have.all.keys('x','y') — all intermediate
+        assert!(
+            funcs[16].analysis.assertion_count >= 1,
+            "TC-17 all intermediate should have assertion_count >= 1, got {}",
+            funcs[16].analysis.assertion_count
+        );
+
+        // TC-18: expect(obj).itself.to.respondTo('bar') — itself intermediate
+        assert!(
+            funcs[17].analysis.assertion_count >= 1,
+            "TC-18 itself intermediate should have assertion_count >= 1, got {}",
+            funcs[17].analysis.assertion_count
+        );
     }
 
     #[test]
@@ -1400,6 +1456,106 @@ describe('d', () => {
             funcs[0].analysis.assertion_count, 1,
             "depth 2 method-call should count exactly 1, got {}",
             funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_chai_deep_intermediate_no_double_count() {
+        // expect(obj).to.have.deep.equal({a:1}) should count exactly 1
+        let source = r#"
+import { expect } from 'chai';
+describe('d', () => {
+  it('t', () => {
+    expect(obj).to.have.deep.equal({a: 1});
+  });
+});
+"#;
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(source, "test.ts");
+        assert_eq!(funcs.len(), 1);
+        assert_eq!(
+            funcs[0].analysis.assertion_count, 1,
+            "deep intermediate should count exactly 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_expect_soft_chain_fixture() {
+        // B1-B10: expect.soft/element/poll modifier chain tests
+        let source = fixture("t001_expect_soft_chain.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_expect_soft_chain.test.ts");
+        assert_eq!(funcs.len(), 10);
+
+        // B1 (regression): expect.soft(x).toBe(y) — depth-2 existing
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "B1 expect.soft depth-2 should have assertion_count >= 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+
+        // B2: expect.soft(x).not.toBe(y) — depth-3
+        assert!(
+            funcs[1].analysis.assertion_count >= 1,
+            "B2 expect.soft.not depth-3 should have assertion_count >= 1, got {}",
+            funcs[1].analysis.assertion_count
+        );
+
+        // B3: expect.soft(x).resolves.toBe(y) — depth-3
+        assert!(
+            funcs[2].analysis.assertion_count >= 1,
+            "B3 expect.soft.resolves depth-3 should have assertion_count >= 1, got {}",
+            funcs[2].analysis.assertion_count
+        );
+
+        // B4: expect.soft(x).rejects.toThrow() — depth-3
+        assert!(
+            funcs[3].analysis.assertion_count >= 1,
+            "B4 expect.soft.rejects depth-3 should have assertion_count >= 1, got {}",
+            funcs[3].analysis.assertion_count
+        );
+
+        // B5: expect.soft(x).resolves.not.toBe(y) — depth-4
+        assert!(
+            funcs[4].analysis.assertion_count >= 1,
+            "B5 expect.soft.resolves.not depth-4 should have assertion_count >= 1, got {}",
+            funcs[4].analysis.assertion_count
+        );
+
+        // B6: expect.soft(x).rejects.not.toThrow(TypeError) — depth-4
+        assert!(
+            funcs[5].analysis.assertion_count >= 1,
+            "B6 expect.soft.rejects.not depth-4 should have assertion_count >= 1, got {}",
+            funcs[5].analysis.assertion_count
+        );
+
+        // B7 (negative): expect.soft(x).resolves.customHelper() — NOT a toX terminal
+        assert_eq!(
+            funcs[6].analysis.assertion_count, 0,
+            "B7 customHelper should have assertion_count == 0, got {}",
+            funcs[6].analysis.assertion_count
+        );
+
+        // B8 (negative): no assertions
+        assert_eq!(
+            funcs[7].analysis.assertion_count, 0,
+            "B8 no assertion should have assertion_count == 0, got {}",
+            funcs[7].analysis.assertion_count
+        );
+
+        // B9: expect.element(loc).not.toHaveText('x') — depth-3
+        assert!(
+            funcs[8].analysis.assertion_count >= 1,
+            "B9 expect.element.not depth-3 should have assertion_count >= 1, got {}",
+            funcs[8].analysis.assertion_count
+        );
+
+        // B10: expect.poll(fn).not.toBe(0) — depth-3
+        assert!(
+            funcs[9].analysis.assertion_count >= 1,
+            "B10 expect.poll.not depth-3 should have assertion_count >= 1, got {}",
+            funcs[9].analysis.assertion_count
         );
     }
 
