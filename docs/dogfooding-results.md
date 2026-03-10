@@ -16,6 +16,8 @@ exspec version: 0.1.0 (commit 5957cd0)
 | laravel (post-#44) | PHP | 10790 | ~224 | -- | named-class assert, Facade assert |
 | laravel (post-#45/46) | PHP | 10790 | 222 | -- | helper delegation ($this->fails(), $assert->has()) |
 | pydantic | Python | ~2500 | 105 | ~55% (58/105) | benchmark() fixture (43), helper/nested (15) |
+| nestjs (pre-fix) | TypeScript | 2675 | 90 | 90% (81/90) | Chai aliases, Sinon mock .verify() |
+| nestjs (post-#50) | TypeScript | 2675 | 34 | ~26% (est.) | Sinon .verify(), return wrapper, helper delegation |
 
 ### Acceptance Criteria Status
 
@@ -203,6 +205,55 @@ Based on dogfooding data:
 
 **Status**: CLOSED. No further vitest-specific T001 work planned.
 
+## NestJS Dogfooding (2026-03-10)
+
+**2675 tests, 380 files, 90 T001 BLOCK → 81 FP (90%), 9 TP (10%)**
+
+### FP Breakdown
+
+| FP Pattern | Count | Root Cause |
+|-----------|-------|-----------|
+| `chai_instanceof_alias` | 20 | `.instanceof()` (lowercase) missing from method terminals |
+| `sinon_mock_verify` | 17 | `.verify()` pattern not detected |
+| `chai_throws_alias` | 11 | `.throws()` missing (only `throw`) |
+| `chai_throw_property` | 6 | `.to.be.throw` (property) missing |
+| `chai_eventually_deep` | 6 | depth > 5 + `and` not in intermediate chain |
+| `chai_contains_alias` | 6 | `.contains()` missing (only `contain`) |
+| `chai_ownProperty` | 5 | `.ownProperty()` missing from method terminals |
+| `chai_length` | 5 | `.length()` missing (only `lengthOf`) |
+| `chai_equals_alias` | 3 | `.equals()` missing (only `equal`) |
+| `return_expect_rejected` | 2 | `return expect(...)...` wrapped in `return_statement` |
+
+### TP Breakdown (9)
+
+| Category | Count | Examples |
+|----------|-------|---------|
+| `done()` callback oracle | 3 | router-response-controller.spec.ts |
+| Helper delegation (no direct assertion) | 3 | file-type.validator.spec.ts, client-tcp.spec.ts |
+| `expect(value)` bare (no chain, no-op) | 2 | bar.service.spec.ts |
+| `@ts-expect-error` compile-time check | 1 | reflector.service.spec.ts |
+
+### Issues Filed
+
+| # | Title | Expected Impact |
+|---|-------|----------------|
+| #50 | T001 FP: TS Chai alias/property vocabulary expansion | -56~62 FPs |
+| #51 | T001 FP: TS Sinon mock .verify() method-call oracle | -17 FPs |
+| #52 | T001 FP: TS return-wrapped Chai property assertions | -2 FPs |
+
+### WARN/INFO Summary
+
+| Rule | Count | % of Tests |
+|------|-------|-----------|
+| T102 (fixture-sprawl) | 378 | 14.1% |
+| T109 (undescriptive-name) | 348 | 13.0% |
+| T105 (deterministic-no-metamorphic) | 143 | 5.3% |
+| T101 (how-not-what) | 38 | 1.4% |
+| T106 (duplicate-literal) | 22 | 0.8% |
+| T003 (giant-test) | 18 | 0.7% |
+| T108 (wait-and-see) | 12 | 0.4% |
+| T002 (mock-overuse) | 4 | 0.1% |
+
 ## Reproduction
 
 ```bash
@@ -215,4 +266,5 @@ cargo build --release
 ./target/release/exspec --lang python --format json /tmp/requests/tests
 ./target/release/exspec --lang typescript --format json /tmp/vitest/test
 ./target/release/exspec --lang php --format json /tmp/laravel/tests
+./target/release/exspec --lang typescript --format json /tmp/nestjs
 ```

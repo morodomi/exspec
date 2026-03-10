@@ -1785,4 +1785,77 @@ describe('d', () => {
             "no-assertion test should have assertion_count == 0"
         );
     }
+
+    // --- T001 FP fix: Chai NestJS alias/property vocabulary expansion (#50) ---
+
+    #[test]
+    fn t001_chai_nestjs_aliases_fixture() {
+        let source = fixture("t001_chai_nestjs_aliases.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_chai_nestjs_aliases.test.ts");
+        assert_eq!(funcs.len(), 9);
+
+        // TC-01: instanceof method alias (depth-3)
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "TC-01 instanceof alias should have assertion_count >= 1, got {}",
+            funcs[0].analysis.assertion_count
+        );
+
+        // TC-02: throws method alias (depth-2)
+        assert!(
+            funcs[1].analysis.assertion_count >= 1,
+            "TC-02 throws alias should have assertion_count >= 1, got {}",
+            funcs[1].analysis.assertion_count
+        );
+
+        // TC-03: contains method alias (depth-2)
+        assert!(
+            funcs[2].analysis.assertion_count >= 1,
+            "TC-03 contains alias should have assertion_count >= 1, got {}",
+            funcs[2].analysis.assertion_count
+        );
+
+        // TC-04: equals method alias (depth-2)
+        assert!(
+            funcs[3].analysis.assertion_count >= 1,
+            "TC-04 equals alias should have assertion_count >= 1, got {}",
+            funcs[3].analysis.assertion_count
+        );
+
+        // TC-05: ownProperty method (depth-3)
+        assert!(
+            funcs[4].analysis.assertion_count >= 1,
+            "TC-05 ownProperty should have assertion_count >= 1, got {}",
+            funcs[4].analysis.assertion_count
+        );
+
+        // TC-06: length method alias (depth-3)
+        assert!(
+            funcs[5].analysis.assertion_count >= 1,
+            "TC-06 length alias should have assertion_count >= 1, got {}",
+            funcs[5].analysis.assertion_count
+        );
+
+        // TC-07: throw property terminal (depth-3, no parens)
+        assert!(
+            funcs[6].analysis.assertion_count >= 1,
+            "TC-07 throw property should have assertion_count >= 1, got {}",
+            funcs[6].analysis.assertion_count
+        );
+
+        // TC-08: and intermediate + instanceof alias (deep chain)
+        assert!(
+            funcs[7].analysis.assertion_count >= 1,
+            "TC-08 and+instanceof deep chain should have assertion_count >= 1, got {}",
+            funcs[7].analysis.assertion_count
+        );
+
+        // TC-09: negative — truly assertion-free (TP control)
+        assert_eq!(
+            funcs[8].analysis.assertion_count, 0,
+            "TC-09 no assertion should have assertion_count == 0, got {}",
+            funcs[8].analysis.assertion_count
+        );
+    }
 }
