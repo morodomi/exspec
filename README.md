@@ -2,6 +2,8 @@
 
 Static analyzer for test design quality. Verifies that tests function as executable specifications -- fast, language-agnostic, zero LLM cost.
 
+> **Public beta** (v0.1.0). Dogfooded across 9 projects / 4 languages / ~23,000 tests. Not production-ready -- rule IDs, severity levels, and config format may change.
+
 ## Why exspec?
 
 | Tool | Focus | exspec's Niche |
@@ -10,32 +12,7 @@ Static analyzer for test design quality. Verifies that tests function as executa
 | Mutation testing | Fault detection (slow) | **Static** analysis (fast) |
 | similarity | Duplicate detection | Specification quality |
 
-exspec checks whether your tests are well-designed *specifications*, not just code that runs.
-
-## Philosophy
-
-exspec enforces 4 properties of executable specifications:
-
-| Property | What it means | Rules |
-|----------|--------------|-------|
-| **What not How** | Tests describe behavior, not implementation. Mocks for uncontrollable boundaries (time, external APIs) are OK | T002, T101 |
-| **Living Documentation** | Tests are readable as specs without separate docs | T107, T109 |
-| **Compositional** | Each test verifies one responsibility (line count and assertion count are proxy indicators) | T003, T006, T102, T108 |
-| **Single Source of Truth** | One spec, one place (within same level/viewpoint) | T106 |
-
-For the full design rationale, see [docs/philosophy.md](docs/philosophy.md).
-
-### What exspec does NOT do
-
-- **Semantic validation**: exspec cannot judge whether your test *name* truly describes the behavior, or whether your Property invariant is sound
-- **Coverage measurement**: Use lcov, istanbul, or coverage.py for that
-- **LLM calls**: exspec runs in milliseconds with zero API cost
-
-### Known Constraints
-
-- **Rust macro-generated tests**: tree-sitter parses macro bodies as opaque `token_tree` nodes. Test functions generated inside macros (e.g. `rgtest!`, custom test harnesses) are **not detected**. Custom assertion macros (e.g. `assert_pending!`, `assert_ready!`) are also invisible. Use `[assertions] custom_patterns` for assertion macros
-- **TypeScript T107 (assertion-roulette)**: Always set to `assertion_count` rather than independently counting message arguments. This avoids false positives but means T107 never fires for TypeScript
-- **Helper delegation**: Test functions that delegate assertions to project-local helpers (e.g. `self.assertValid(...)`, `assertJsonStructure(...)`) are not recognized unless configured via `[assertions] custom_patterns`
+exspec checks whether your tests are well-designed *specifications*, not just code that runs. It enforces 4 properties: **What not How**, **Living Documentation**, **Compositional**, **Single Source of Truth**. See [docs/philosophy.md](docs/philosophy.md) for the full rationale.
 
 ## Install
 
@@ -43,40 +20,24 @@ For the full design rationale, see [docs/philosophy.md](docs/philosophy.md).
 cargo install --git https://github.com/morodomi/exspec.git
 ```
 
-> **Note**: exspec is not yet published to crates.io. Install from the Git repository.
+> Not yet published to crates.io. Install from the Git repository.
 
 ## Quick Start
 
 ```bash
-# Analyze current directory
-exspec .
-
-# Initialize config
-exspec init --lang python,typescript
-
-# Analyze with specific language
-exspec --lang python .
-
-# Strict mode (WARN also fails)
-exspec --strict .
+exspec .                              # Analyze current directory
+exspec init --lang python,typescript  # Generate .exspec.toml
+exspec --lang python .                # Analyze specific language
+exspec --strict .                     # WARN also fails
 ```
 
-## Output
+Example output:
 
 ```
 exspec v0.1.0 -- 8 test files, 10 test functions
-BLOCK tests/fixtures/typescript/t001_violation.test.ts:1 T001 assertion-free: test has no assertions
-WARN tests/fixtures/typescript/t002_violation.test.ts:1 T002 mock-overuse: 6 mocks (6 classes), threshold: 5 mocks / 3 classes
-WARN tests/fixtures/typescript/t003_violation.test.ts:1 T003 giant-test: 74 lines, threshold: 50
-Score: BLOCK 1 | WARN 2 | INFO 0 | PASS 7
-```
-
-## Output Formats
-
-```bash
-exspec .                      # Terminal (default)
-exspec --format json .        # JSON
-exspec --format sarif .       # SARIF (GitHub Code Scanning)
+BLOCK tests/test_example.py:5 T001 assertion-free: test has no assertions
+WARN  tests/test_example.py:20 T002 mock-overuse: 6 mocks (6 classes), threshold: 5 mocks / 3 classes
+Score: BLOCK 1 | WARN 1 | INFO 0 | PASS 8
 ```
 
 ## Supported Languages
@@ -89,9 +50,11 @@ exspec --format sarif .       # SARIF (GitHub Code Scanning)
 | Rust | cargo test | v0.1.0 |
 | Dart | flutter_test | Planned |
 
+Each language has specific detection patterns and known gaps. See [docs/languages.md](docs/languages.md) for details.
+
 ## Check Rules
 
-### Tier 1 (MVP)
+### Tier 1
 
 | ID | Rule | Level | Description |
 |----|------|-------|-------------|
@@ -104,7 +67,7 @@ exspec --format sarif .       # SARIF (GitHub Code Scanning)
 | T007 | test-source-ratio | INFO | Test file to source file ratio |
 | T008 | no-contract | INFO | No schema validation in tests |
 
-### Tier 2 (v0.2)
+### Tier 2
 
 | ID | Rule | Level |
 |----|------|-------|
@@ -117,30 +80,25 @@ exspec --format sarif .       # SARIF (GitHub Code Scanning)
 | T108 | wait-and-see | WARN |
 | T109 | undescriptive-test-name | INFO |
 
-### Tier 3 (v1.0) -- AI Prompt Generation
-
-For semantic checks that require LLM reasoning, exspec generates review prompts instead of making judgments.
-
 ## Gradual Adoption
 
-Start with Tier 1 rules only. Disable Tier 2 until your codebase is clean:
+Start with Tier 1 only. Disable Tier 2 until your codebase is clean:
 
 ```toml
-# .exspec.toml -- starter config
+# .exspec.toml
 [rules]
 disable = ["T101", "T102", "T103", "T105", "T106", "T107", "T108", "T109"]
 ```
 
-Once Tier 1 passes cleanly, enable Tier 2 rules one at a time. Use inline suppression for known exceptions:
+Once Tier 1 passes, enable Tier 2 rules one at a time. Use inline suppression for known exceptions:
 
 ```python
 # exspec-ignore: T002
 def test_complex_integration():
-    # This test legitimately needs many mocks for external boundaries
     ...
 ```
 
-For projects with custom assertion helpers, add them to the config to avoid T001 false positives:
+For projects with custom assertion helpers, add them to avoid T001 false positives:
 
 ```toml
 [assertions]
@@ -149,131 +107,50 @@ custom_patterns = ["assertJsonStructure", "self.assertValid"]
 
 ## CI Integration
 
-### GitHub Actions (SARIF)
-
-Upload results to GitHub Code Scanning for inline PR annotations:
-
-```yaml
-# .github/workflows/exspec.yml
-name: Test Quality
-on: [pull_request]
-jobs:
-  exspec:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo install --git https://github.com/morodomi/exspec.git
-      - run: exspec --format sarif . > results.sarif
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-```
-
-### Simple CI (exit code)
-
-For any CI system -- exspec exits 1 on BLOCK violations:
-
 ```yaml
 - run: cargo install --git https://github.com/morodomi/exspec.git
 - run: exspec .
 ```
 
-Use `--strict` to also fail on WARN:
+exspec exits 1 on BLOCK violations, 0 otherwise. Use `--strict` to also fail on WARN. SARIF output is available for GitHub Code Scanning. See [docs/ci.md](docs/ci.md) for full examples.
 
-```yaml
-- run: exspec --strict .
-```
+## Known Constraints
 
-## Configuration
+- **Rust macro-generated tests**: Invisible to tree-sitter. Custom assertion macros need `custom_patterns`
+- **TypeScript T107**: Intentionally disabled (high false positive rate in dogfooding)
+- **Helper delegation**: Project-local assertion helpers need `custom_patterns` config
 
-Create `.exspec.toml` in your project root:
+See [docs/known-constraints.md](docs/known-constraints.md) for details, workarounds, and dogfooding data.
 
-```toml
-[general]
-lang = ["python", "typescript"]
+## Validation
 
-[rules]
-disable = ["T004"]
+Dogfooded across 9 real-world projects:
 
-[thresholds]
-mock_max = 5
-mock_class_max = 3
-test_max_lines = 50
-parameterized_min_ratio = 0.1
+| Project | Language | Tests | Result |
+|---------|----------|-------|--------|
+| exspec (self) | Rust | 51 | 0 FP |
+| requests | Python | 339 | ~20% FP |
+| fastapi | Python | 2,121 | 21% FP |
+| pydantic | Python | ~2,500 | ~55% FP |
+| vitest | TypeScript | 3,120 | Remaining = project-local helpers |
+| nestjs | TypeScript | 2,675 | 0% FP (17 remaining = all TP) |
+| laravel | PHP | 10,790 | Remaining = helper delegation |
+| ripgrep | Rust | ~346 | 330 tests in macros (not detected) |
+| tokio | Rust | 1,582 | 33.8% FP (custom assert macros) |
 
-[paths]
-test_patterns = ["tests/**", "**/*_test.*", "**/*.test.*"]
-ignore = ["node_modules", ".venv", "vendor"]
-```
+Full results: [docs/dogfooding-results.md](docs/dogfooding-results.md)
 
-Or generate one:
+## Documentation
 
-```bash
-exspec init --lang python,typescript
-```
-
-## Inline Suppression
-
-Suppress specific rules per function:
-
-```python
-# exspec-ignore: T002
-def test_complex_integration():
-    ...
-```
-
-```typescript
-// exspec-ignore: T002, T003
-test('complex integration', () => {
-  ...
-});
-```
-
-### Limitations
-
-- **TypeScript `describe()` scope**: Inline suppression applies to the **next** `test()`/`it()` call only. Placing `// exspec-ignore` above a `describe()` block does **not** suppress rules for all tests inside it. Suppress each test individually.
-
-## Architecture
-
-Built with Rust + tree-sitter for fast, language-agnostic AST analysis. Detection queries are externalized as `.scm` files, allowing logic adjustments without recompilation.
-
-```
-crates/
-  core/           Language-independent analysis engine
-  lang-python/    Python queries/*.scm
-  lang-typescript/ TypeScript queries/*.scm
-  cli/            CLI entry point
-```
-
-## dev-crew Integration
-
-exspec runs as a zero-cost quality gate in the TDD RED phase:
-
-```
-RED Phase (test written)
-  └── exspec --format json --strict {test_files}
-      ├── exit 0 → proceed to GREEN
-      └── exit 1 → feedback to fix tests
-```
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | No BLOCK violations (default) / No WARN+ (--strict) |
-| 1 | BLOCK violations found (default) / WARN+ found (--strict) |
-
-## Score Semantics
-
-The `PASS` count in the output score line represents test functions without violations:
-
-```
-PASS = total_test_functions - unique_violated_functions
-```
-
-- A test function with **multiple violations** (e.g., both T001 and T003) counts as **1** violated function, not 2.
-- **File-level diagnostics** (T004, T005, T006, T008) and **project-level diagnostics** (T007) do **not** reduce the PASS count. Only per-function rules (T001-T003) affect it.
-- Uniqueness is determined by `(file, line)` pair.
+| Doc | Content |
+|-----|---------|
+| [docs/languages.md](docs/languages.md) | Language-specific detection, assertions, known gaps |
+| [docs/known-constraints.md](docs/known-constraints.md) | Limitations, workarounds, dogfooding data |
+| [docs/configuration.md](docs/configuration.md) | `.exspec.toml` reference, inline suppression |
+| [docs/ci.md](docs/ci.md) | CI setup, SARIF, exit codes, score semantics |
+| [docs/philosophy.md](docs/philosophy.md) | Design rationale, 4 properties |
+| [docs/dogfooding-results.md](docs/dogfooding-results.md) | Full dogfooding results |
+| [CHANGELOG.md](CHANGELOG.md) | Release history |
 
 ## Contributing
 
