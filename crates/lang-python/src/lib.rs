@@ -102,6 +102,25 @@ fn is_in_non_test_class(root: Node, start_byte: usize, end_byte: usize, source: 
     }
 }
 
+fn is_pytest_fixture_decorator(decorated_node: Node, source: &[u8]) -> bool {
+    let mut cursor = decorated_node.walk();
+    for child in decorated_node.children(&mut cursor) {
+        if child.kind() != "decorator" {
+            continue;
+        }
+        let Ok(text) = child.utf8_text(source) else {
+            continue;
+        };
+        // Strip leading '@' and trailing '(...)' or whitespace to get the decorator name
+        let trimmed = text.trim_start_matches('@');
+        let name = trimmed.split('(').next().unwrap_or("").trim();
+        if name == "pytest.fixture" || name == "fixture" {
+            return true;
+        }
+    }
+    false
+}
+
 fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec<TestFunction> {
     let test_query = cached_query(&TEST_QUERY_CACHE, TEST_FUNCTION_QUERY);
     let assertion_query = cached_query(&ASSERTION_QUERY_CACHE, ASSERTION_QUERY);
@@ -149,7 +168,14 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
                     .node
                     .child_by_field_name("definition")
                     .unwrap_or(dec.node);
+                // Always register the inner function as "has a decorated match" so the
+                // dedup retain step removes any bare @function match for the same node.
                 decorated_fn_ids.insert(inner_fn.id());
+                // Skip @pytest.fixture / @fixture decorated functions — they are
+                // test data providers, not test functions (prevents T001 FPs).
+                if is_pytest_fixture_decorator(dec.node, source_bytes) {
+                    continue;
+                }
                 test_matches.push(TestMatch {
                     name,
                     dedup_id: inner_fn.id(),
@@ -1556,6 +1582,93 @@ mod tests {
         assert!(
             t001_diags.is_empty(),
             "comment match is included by design - T001 should not fire"
+        );
+    }
+
+    // --- #56: pytest fixture with test_ prefix false positive ---
+
+    #[test]
+    fn pytest_fixture_decorated_test_excluded() {
+        // TC-01: @pytest.fixture decorated test_data -> NOT included
+        let source = fixture("test_fixture_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_fixture_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            !names.contains(&"test_data"),
+            "@pytest.fixture test_data should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn pytest_fixture_with_parens_excluded() {
+        // TC-02: @pytest.fixture() with parens -> NOT included
+        let source = fixture("test_fixture_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_fixture_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            !names.contains(&"test_config"),
+            "@pytest.fixture() test_config should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn bare_fixture_decorator_excluded() {
+        // TC-03: @fixture (from pytest import fixture) -> NOT included
+        let source = fixture("test_fixture_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_fixture_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            !names.contains(&"test_input"),
+            "@fixture test_input should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn patch_decorated_real_test_included() {
+        // TC-04: @patch("x") decorated real test -> IS included (no regression)
+        let source = fixture("test_fixture_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_fixture_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_something"),
+            "@patch decorated test_something should be included: {names:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_fixture_and_real_tests_evaluated() {
+        // TC-05: Mixed file -> fixtures excluded, real tests evaluated normally
+        use exspec_core::rules::{evaluate_rules, Config};
+
+        let source = fixture("test_fixture_false_positive.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "test_fixture_false_positive.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+
+        // 3 real tests: test_something, test_real_function, test_uses_fixture
+        assert_eq!(
+            funcs.len(),
+            3,
+            "expected 3 real tests (fixtures excluded): {names:?}"
+        );
+
+        // T001 should fire only on test_uses_fixture (assertion-free)
+        let config = Config::default();
+        let diags = evaluate_rules(&funcs, &config);
+        let t001_diags: Vec<_> = diags.iter().filter(|d| d.rule.0 == "T001").collect();
+        assert_eq!(
+            t001_diags.len(),
+            1,
+            "only test_uses_fixture should trigger T001: {t001_diags:?}"
+        );
+        assert!(
+            t001_diags[0].message.contains("test_uses_fixture"),
+            "T001 should reference test_uses_fixture: {}",
+            t001_diags[0].message
         );
     }
 }

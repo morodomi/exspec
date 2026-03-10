@@ -120,7 +120,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
                 severity: Severity::Block,
                 file: func.file.clone(),
                 line: Some(func.line),
-                message: "assertion-free: test has no assertions".to_string(),
+                message: format!("assertion-free: {} has no assertions", func.name),
                 details: None,
             });
         }
