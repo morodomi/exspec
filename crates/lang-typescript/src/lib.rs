@@ -22,7 +22,7 @@ const RELATIONAL_ASSERTION_QUERY: &str = include_str!("../queries/relational_ass
 const WAIT_AND_SEE_QUERY: &str = include_str!("../queries/wait_and_see.scm");
 
 fn ts_language() -> tree_sitter::Language {
-    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    tree_sitter_typescript::LANGUAGE_TSX.into()
 }
 
 fn cached_query<'a>(lock: &'a OnceLock<Query>, source: &str) -> &'a Query {
@@ -51,7 +51,7 @@ impl TypeScriptExtractor {
 
     pub fn parser() -> Parser {
         let mut parser = Parser::new();
-        let language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT;
+        let language = tree_sitter_typescript::LANGUAGE_TSX;
         parser
             .set_language(&language.into())
             .expect("failed to load TypeScript grammar");
@@ -422,6 +422,28 @@ mod tests {
         let extractor = TypeScriptExtractor::new();
         let funcs = extractor.extract_test_functions(&source, "t001_pass.test.ts");
         assert!(funcs[0].analysis.assertion_count >= 1);
+    }
+
+    // --- TSX support (#53) ---
+
+    #[test]
+    fn tsx_file_detects_assertions() {
+        let source = fixture("t001_tsx_assertion.test.tsx");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_tsx_assertion.test.tsx");
+        assert_eq!(
+            funcs.len(),
+            2,
+            "should extract 2 test functions from TSX file"
+        );
+        for f in &funcs {
+            assert!(
+                f.analysis.assertion_count >= 1,
+                "test '{}' should have assertions detected in TSX file, got {}",
+                f.name,
+                f.analysis.assertion_count
+            );
+        }
     }
 
     // --- Cycle 2: Mock detection ---

@@ -210,6 +210,7 @@ cargo llvm-cov --lcov --output-path lcov.info   # カバレッジ (CI用)
 cargo clippy -- -D warnings                     # 静的解析
 cargo fmt --check                               # フォーマットチェック
 cargo fmt                                       # フォーマット適用
+cargo run -- --lang rust .                      # self-dogfooding (BLOCK 0件を確認)
 ```
 
 ## TDD Workflow
@@ -237,6 +238,12 @@ Cycle docs: `docs/cycles/YYYYMMDD_HHMM_<topic>.md`
 | Coverage | 90%+ (min 80%) |
 | Static analysis (clippy) | 0 errors |
 | Format (rustfmt) | 差分なし |
+| exspec (self-dogfooding) | BLOCK 0件 |
+
+### Self-Dogfooding
+
+exspec自身のテストに対して `cargo run -- --lang rust .` を実行し、BLOCKが0件であることを確認する。
+RED phase完了時またはコミット前に必ず実施すること。
 
 ## AI Behavior Principles
 
@@ -253,4 +260,4 @@ Cycle docs: `docs/cycles/YYYYMMDD_HHMM_<topic>.md`
 feat | fix | docs | refactor | test | chore
 ```
 
-コミット前: `cargo test` + `cargo clippy -- -D warnings` + `cargo fmt --check`
+コミット前: `cargo test` + `cargo clippy -- -D warnings` + `cargo fmt --check` + `cargo run -- --lang rust .`
