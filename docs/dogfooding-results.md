@@ -21,6 +21,7 @@ exspec version: 0.1.0 (commit 5957cd0)
 | nestjs (post-#51) | TypeScript | 2675 | 17 (confirmed) | 0% | helper delegation, done() callback, bare expect() |
 | ripgrep | Rust | 16 (of ~346) | 0 | 0% | ~330 tests in `rgtest!` macro not detected (token_tree) |
 | tokio | Rust | 1582 | 388 | 33.8% (131/388) | custom assert macros (124), select! token_tree (7) |
+| clap | Rust | 1455 | 528 | 41.3% (218/528) | assert_data_eq! macro (115), helper delegation (103) |
 
 ### Acceptance Criteria Status
 
@@ -310,6 +311,42 @@ Detected tests (16) had clean results:
 
 **Conclusion**: ripgrep is not usable as a Rust dogfooding benchmark due to macro-heavy test structure. Use tokio instead.
 
+### clap
+
+**1455 tests, 134 files, 528 T001 BLOCK. FP rate: 41.3% (218/528).**
+
+Test detection worked well (1455/~1577 `#[test]` detected). `#[should_panic]` (70 tests) correctly excluded from T001.
+
+#### BLOCK Breakdown
+
+| Category | Count | Type | Notes |
+|----------|-------|------|-------|
+| Truly assertion-free | 310 | TP | Builder pattern tests, smoke tests, no oracle |
+| `assert_data_eq!` macro | 115 | FP | snapbox custom assertion macro (token_tree) |
+| `common::assert_matches()` helper | 103 | FP | Helper delegation to shared test utility |
+
+#### Key Findings
+
+1. **clap confirms the two known Rust FP patterns**: custom assertion macros (token_tree) and helper delegation. No new FP categories found.
+
+2. **`#[should_panic]` detection works correctly**: All 70 `#[should_panic]` tests were excluded from T001, confirming the sibling-walk detection logic.
+
+3. **`custom_patterns` mitigation**:
+   ```toml
+   [assertions]
+   custom_patterns = ["assert_data_eq!", "assert_matches"]
+   ```
+
+4. **High TP count (310)** is notable: clap has many tests that construct a `Command` and call `.debug_assert()` or just verify parsing succeeds without checking the result. These are genuinely assertion-free smoke tests.
+
+#### WARN Summary
+
+| Rule | Count | % of Tests |
+|------|-------|-----------|
+| T003 (giant-test) | 51 | 3.5% |
+| T102 (fixture-sprawl) | 19 | 1.3% |
+| T006 (low-assertion-density) | 9 | 0.6% |
+
 ### tokio
 
 **1582 tests, 271 files, 388 T001 BLOCK. FP rate: 33.8% (131/388).**
@@ -365,4 +402,5 @@ cargo build --release
 ./target/release/exspec --lang typescript --format json /tmp/nestjs
 ./target/release/exspec --lang rust --format json /tmp/ripgrep
 ./target/release/exspec --lang rust --format json /tmp/tokio
+./target/release/exspec --lang rust --format json /tmp/clap
 ```
