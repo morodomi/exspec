@@ -37,12 +37,12 @@
   name: (name) @_smethod
   (#match? @_smethod "^assert([A-Z_]|$)")) @assertion
 
-; Named-class static: Assert::assertEquals(), SomeAssert::assertTrue(), etc.
-; Matches scoped_call_expression where scope is a simple name ending with "Assert" (or exact "Assert").
+; Named-class static: ClassName::assert*() — covers PHPUnit Assert, Laravel Facades, etc.
+; Examples: Assert::assertEquals(), Event::assertDispatched(), Sleep::assertSequence()
+; In PHP test files, any static assert*() call is treated as an oracle by convention.
 (scoped_call_expression
   scope: (name) @_cls
   name: (name) @_sm
-  (#match? @_cls "Assert$")
   (#match? @_sm "^assert([A-Z_]|$)")) @assertion
 
 ; FQCN static: PHPUnit\Framework\Assert::assertSame(), etc.
@@ -50,7 +50,6 @@
 (scoped_call_expression
   scope: (qualified_name) @_qcls
   name: (name) @_qm
-  (#match? @_qcls "Assert$")
   (#match? @_qm "^assert([A-Z_]|$)")) @assertion
 
 ; Mockery: ->shouldReceive(...) — sets mock expectation (verified at teardown)

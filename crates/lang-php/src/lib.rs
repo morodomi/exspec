@@ -1619,4 +1619,68 @@ mod tests {
             f.analysis.assertion_count
         );
     }
+
+    #[test]
+    fn t001_facade_event_assert_dispatched() {
+        let source = fixture("t001_pass_facade_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_facade_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_event_assert_dispatched")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Event::assertDispatched() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_facade_sleep_assert_sequence() {
+        let source = fixture("t001_pass_facade_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_facade_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_sleep_assert_sequence")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Sleep::assertSequence() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_facade_exceptions_assert_reported() {
+        let source = fixture("t001_pass_facade_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_facade_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_exceptions_assert_reported")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Exceptions::assertReported() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_facade_bus_assert_dispatched() {
+        let source = fixture("t001_pass_facade_assert.php");
+        let extractor = PhpExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_facade_assert.php");
+        let f = funcs
+            .iter()
+            .find(|f| f.name == "test_bus_assert_dispatched")
+            .unwrap();
+        assert!(
+            f.analysis.assertion_count >= 1,
+            "Bus::assertDispatched() should count as assertion, got {}",
+            f.analysis.assertion_count
+        );
+    }
 }
