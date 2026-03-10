@@ -82,6 +82,7 @@ pub struct Config {
     pub min_duplicate_count: usize,
     pub disabled_rules: Vec<RuleId>,
     pub custom_assertion_patterns: Vec<String>,
+    pub ignore_patterns: Vec<String>,
 }
 
 impl Default for Config {
@@ -96,6 +97,7 @@ impl Default for Config {
             min_duplicate_count: 3,
             disabled_rules: Vec::new(),
             custom_assertion_patterns: Vec::new(),
+            ignore_patterns: Vec::new(),
         }
     }
 }

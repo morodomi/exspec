@@ -112,9 +112,15 @@ struct DiscoverResult {
     source_file_count: usize,
 }
 
-fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
+/// Discover test and source files under `root`.
+///
+/// `ignore_patterns` uses simple substring matching on root-relative file paths.
+/// A file is excluded if its relative path contains any of the non-empty ignore patterns.
+/// Future: consider glob or path-segment matching for more precise control.
+fn discover_files(root: &str, lang: Option<&str>, ignore_patterns: &[String]) -> DiscoverResult {
     let mut test_files: HashMap<Language, Vec<String>> = HashMap::new();
     let mut source_count = 0;
+    let root_path = std::path::Path::new(root);
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
 
     let include_python = lang.is_none() || lang == Some("python");
@@ -127,6 +133,18 @@ fn discover_files(root: &str, lang: Option<&str>) -> DiscoverResult {
             continue;
         }
         let path = entry.path().to_string_lossy().to_string();
+
+        let rel_path = entry
+            .path()
+            .strip_prefix(root_path)
+            .unwrap_or(entry.path())
+            .to_string_lossy();
+        if ignore_patterns
+            .iter()
+            .any(|pattern| !pattern.is_empty() && rel_path.contains(pattern.as_str()))
+        {
+            continue;
+        }
 
         let detected_test = if include_python && is_python_test_file(&path) {
             Some(Language::Python)
@@ -220,7 +238,7 @@ fn main() {
     let php_extractor = PhpExtractor::new();
     let rust_extractor = RustExtractor::new();
 
-    let discovered = discover_files(&cli.path, cli.lang.as_deref());
+    let discovered = discover_files(&cli.path, cli.lang.as_deref(), &config.ignore_patterns);
     let test_file_count: usize = discovered.test_files.values().map(|v| v.len()).sum();
     let mut all_analyses: Vec<FileAnalysis> = Vec::new();
 
@@ -431,7 +449,7 @@ mod tests {
         std::fs::write(dir.join("bar_test.py"), "").unwrap();
         std::fs::write(dir.join("helper.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
         assert_eq!(get_test_files(&result, Language::Python).len(), 2);
         assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -444,7 +462,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), Some("python"));
+        let result = discover_files(dir.to_str().unwrap(), Some("python"), &[]);
         assert_eq!(get_test_files(&result, Language::Python).len(), 1);
         assert_eq!(get_test_files(&result, Language::TypeScript).len(), 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -457,7 +475,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), Some("typescript"));
+        let result = discover_files(dir.to_str().unwrap(), Some("typescript"), &[]);
         assert_eq!(get_test_files(&result, Language::Python).len(), 0);
         assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -470,7 +488,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
         std::fs::write(dir.join("UserTest.php"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), Some("php"));
+        let result = discover_files(dir.to_str().unwrap(), Some("php"), &[]);
         assert_eq!(get_test_files(&result, Language::Python).len(), 0);
         assert_eq!(get_test_files(&result, Language::Php).len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
@@ -478,7 +496,7 @@ mod tests {
 
     #[test]
     fn discover_test_files_ignores_venv() {
-        let result = discover_files(".", None);
+        let result = discover_files(".", None, &[]);
         let py = get_test_files(&result, Language::Python);
         assert!(py.iter().all(|f| !f.contains(".venv")));
     }
@@ -495,7 +513,7 @@ mod tests {
         std::fs::write(dir.join("test_app.py"), "").unwrap();
         std::fs::write(dir.join("utils.ts"), "").unwrap();
         std::fs::write(dir.join("utils.test.ts"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
         assert_eq!(result.source_file_count, 2); // app.py + utils.ts (test files excluded)
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -511,7 +529,7 @@ mod tests {
         std::fs::write(dir.join("app.py"), "").unwrap();
         std::fs::write(dir.join("baz.test.ts"), "").unwrap();
         std::fs::write(dir.join("utils.ts"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
         assert_eq!(get_test_files(&result, Language::Python).len(), 1);
         assert_eq!(get_test_files(&result, Language::TypeScript).len(), 1);
         assert_eq!(result.source_file_count, 2); // app.py + utils.ts
@@ -527,7 +545,7 @@ mod tests {
         std::fs::create_dir_all(dir.join(".hidden")).unwrap();
         std::fs::write(dir.join(".hidden/test_foo.py"), "").unwrap();
         std::fs::write(dir.join("test_visible.py"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
         let py = get_test_files(&result, Language::Python);
         assert_eq!(py.len(), 1, "should only find visible file: {py:?}");
         assert!(py[0].contains("test_visible.py"));
@@ -544,9 +562,99 @@ mod tests {
         std::fs::write(dir.join("UserTest.php"), "").unwrap();
         std::fs::write(dir.join("User.php"), "").unwrap();
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), None);
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
         assert_eq!(get_test_files(&result, Language::Php).len(), 1);
         assert_eq!(result.source_file_count, 1); // User.php
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- Ignore patterns filtering ---
+
+    #[test]
+    fn discover_files_filters_by_ignore_patterns() {
+        let dir = std::env::temp_dir().join(format!("exspec_test_ignore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fixtures")).unwrap();
+        std::fs::write(dir.join("fixtures/test_sample.py"), "").unwrap();
+        std::fs::write(dir.join("test_real.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), None, &["fixtures".to_string()]);
+        let py = get_test_files(&result, Language::Python);
+        assert_eq!(py.len(), 1, "fixture file should be excluded: {py:?}");
+        assert!(py[0].contains("test_real.py"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_files_ignore_does_not_exclude_unrelated_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "exspec_test_ignore_nonmatch_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fixtures")).unwrap();
+        std::fs::create_dir_all(dir.join("tests")).unwrap();
+        std::fs::write(dir.join("fixtures/test_sample.py"), "").unwrap();
+        std::fs::write(dir.join("tests/test_real.py"), "").unwrap();
+        std::fs::write(dir.join("test_root.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), None, &["fixtures".to_string()]);
+        let py = get_test_files(&result, Language::Python);
+        assert_eq!(py.len(), 2, "non-matching files should remain: {py:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_files_empty_ignore_excludes_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("exspec_test_no_ignore_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fixtures")).unwrap();
+        std::fs::write(dir.join("fixtures/test_sample.py"), "").unwrap();
+        std::fs::write(dir.join("test_real.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), None, &[]);
+        let py = get_test_files(&result, Language::Python);
+        assert_eq!(py.len(), 2, "empty ignore should exclude nothing: {py:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_files_ignore_empty_string_pattern_excludes_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("exspec_test_ignore_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test_foo.py"), "").unwrap();
+        std::fs::write(dir.join("test_bar.py"), "").unwrap();
+        let result = discover_files(dir.to_str().unwrap(), None, &["".to_string()]);
+        let py = get_test_files(&result, Language::Python);
+        assert_eq!(
+            py.len(),
+            2,
+            "empty string pattern should not exclude any files: {py:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_files_ignore_matches_relative_path_not_absolute() {
+        // Pattern should match against project-relative paths, not absolute paths.
+        // We create a temp dir whose name contains "exspec_test_ignore_relpath_<pid>",
+        // then use a pattern matching part of that absolute prefix.
+        let pid = std::process::id();
+        let dirname = format!("exspec_test_ignore_relpath_{pid}");
+        let dir = std::env::temp_dir().join(&dirname);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test_foo.py"), "").unwrap();
+        // Use a pattern that matches the temp dir name (part of absolute path)
+        // but is NOT in the relative path within the project root
+        let pattern = format!("exspec_test_ignore_relpath_{pid}");
+        let result = discover_files(dir.to_str().unwrap(), None, &[pattern]);
+        let py = get_test_files(&result, Language::Python);
+        assert_eq!(
+            py.len(),
+            1,
+            "pattern matching absolute prefix should not exclude relative files: {py:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1321,7 +1429,7 @@ mod tests {
         std::fs::write(dir.join("tests/integration.rs"), "").unwrap(); // also in tests/ -> test file
         std::fs::write(dir.join("src/lib.rs"), "").unwrap(); // src/ -> source file
         std::fs::write(dir.join("test_foo.py"), "").unwrap();
-        let result = discover_files(dir.to_str().unwrap(), Some("rust"));
+        let result = discover_files(dir.to_str().unwrap(), Some("rust"), &[]);
         assert_eq!(
             get_test_files(&result, Language::Rust).len(),
             2,

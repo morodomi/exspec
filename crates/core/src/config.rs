@@ -89,6 +89,7 @@ impl From<ExspecConfig> for Config {
                 .unwrap_or(defaults.min_duplicate_count),
             disabled_rules: ec.rules.disable.iter().map(|s| RuleId::new(s)).collect(),
             custom_assertion_patterns: ec.assertions.custom_patterns,
+            ignore_patterns: ec.paths.ignore,
         }
     }
 }
@@ -306,6 +307,22 @@ mod tests {
         let ec = ExspecConfig::default();
         let config: Config = ec.into();
         assert!(config.custom_assertion_patterns.is_empty());
+    }
+
+    // --- TC: ignore_patterns propagated from ExspecConfig ---
+    #[test]
+    fn convert_config_propagates_ignore_patterns() {
+        let content = fixture("valid.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        let config: Config = ec.into();
+        assert_eq!(config.ignore_patterns, vec!["node_modules", ".venv"]);
+    }
+
+    #[test]
+    fn convert_config_empty_ignore_gives_empty_patterns() {
+        let ec = ExspecConfig::default();
+        let config: Config = ec.into();
+        assert!(config.ignore_patterns.is_empty());
     }
 
     #[test]
