@@ -380,3 +380,13 @@
       (#match? @_sinon_obj "^[Ss]inon$")
       property: (property_identifier) @_sinon_assert
       (#eq? @_sinon_assert "assert")))) @assertion
+
+;; <expr>.verify() — Sinon mock expectation verification (#51)
+;; e.g., expectation.verify(), mock.verify(), sinon.mock(obj).expects('m').once().verify()
+;; .verify() throws if expectation not met, making it a legitimate test oracle.
+;; Broad match (Option A): any <expr>.verify() counts as assertion.
+;; Risk direction: false negative (misses assertion-free), not false positive.
+(call_expression
+  function: (member_expression
+    property: (property_identifier) @_verify_prop
+    (#eq? @_verify_prop "verify"))) @assertion

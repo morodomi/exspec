@@ -18,6 +18,7 @@ exspec version: 0.1.0 (commit 5957cd0)
 | pydantic | Python | ~2500 | 105 | ~55% (58/105) | benchmark() fixture (43), helper/nested (15) |
 | nestjs (pre-fix) | TypeScript | 2675 | 90 | 90% (81/90) | Chai aliases, Sinon mock .verify() |
 | nestjs (post-#50) | TypeScript | 2675 | 34 | ~26% (est.) | Sinon .verify(), return wrapper, helper delegation |
+| nestjs (post-#51) | TypeScript | 2675 | ~17 (est.) | -- | return wrapper, helper delegation, done() callback |
 
 ### Acceptance Criteria Status
 
@@ -214,7 +215,7 @@ Based on dogfooding data:
 | FP Pattern | Count | Root Cause |
 |-----------|-------|-----------|
 | `chai_instanceof_alias` | 20 | `.instanceof()` (lowercase) missing from method terminals |
-| `sinon_mock_verify` | 17 | `.verify()` pattern not detected |
+| `sinon_mock_verify` | 17 | `.verify()` pattern not detected → **FIXED (#51)** |
 | `chai_throws_alias` | 11 | `.throws()` missing (only `throw`) |
 | `chai_throw_property` | 6 | `.to.be.throw` (property) missing |
 | `chai_eventually_deep` | 6 | depth > 5 + `and` not in intermediate chain |
@@ -237,8 +238,8 @@ Based on dogfooding data:
 
 | # | Title | Expected Impact |
 |---|-------|----------------|
-| #50 | T001 FP: TS Chai alias/property vocabulary expansion | -56~62 FPs |
-| #51 | T001 FP: TS Sinon mock .verify() method-call oracle | -17 FPs |
+| #50 | T001 FP: TS Chai alias/property vocabulary expansion | -56 FPs (DONE) |
+| #51 | T001 FP: TS Sinon mock .verify() method-call oracle | -17 FPs (DONE) |
 | #52 | T001 FP: TS return-wrapped Chai property assertions | -2 FPs |
 
 ### WARN/INFO Summary

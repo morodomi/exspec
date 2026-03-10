@@ -1858,4 +1858,46 @@ describe('d', () => {
             funcs[8].analysis.assertion_count
         );
     }
+
+    // --- T001 FP fix: Sinon mock .verify() method-call oracle (#51) ---
+
+    #[test]
+    fn t001_sinon_verify_fixture_all_detected() {
+        let source = fixture("t001_sinon_verify.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_sinon_verify.test.ts");
+        assert_eq!(funcs.len(), 7);
+
+        // TC-01 through TC-05: all should have assertion_count >= 1
+        for (i, f) in funcs.iter().enumerate().take(5) {
+            assert!(
+                f.analysis.assertion_count >= 1,
+                "TC-{:02} '{}' should have assertion_count >= 1, got {}",
+                i + 1,
+                f.name,
+                f.analysis.assertion_count
+            );
+        }
+
+        // TC-05 specifically: verify + expect — should have assertion_count >= 2
+        assert!(
+            funcs[4].analysis.assertion_count >= 2,
+            "TC-05 verify + expect should have assertion_count >= 2, got {}",
+            funcs[4].analysis.assertion_count
+        );
+
+        // TC-06: mock.restore() — NOT an assertion
+        assert_eq!(
+            funcs[5].analysis.assertion_count, 0,
+            "TC-06 mock.restore should have assertion_count == 0, got {}",
+            funcs[5].analysis.assertion_count
+        );
+
+        // TC-07: no assertion
+        assert_eq!(
+            funcs[6].analysis.assertion_count, 0,
+            "TC-07 no assertion should have assertion_count == 0, got {}",
+            funcs[6].analysis.assertion_count
+        );
+    }
 }
