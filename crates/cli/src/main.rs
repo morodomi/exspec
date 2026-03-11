@@ -5,8 +5,12 @@ use clap::Parser;
 use exspec_core::config::ExspecConfig;
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor};
 use exspec_core::metrics::compute_metrics;
-use exspec_core::output::{compute_exit_code, format_json, format_sarif, format_terminal};
-use exspec_core::rules::{evaluate_file_rules, evaluate_project_rules, evaluate_rules, Config};
+use exspec_core::output::{
+    compute_exit_code, filter_by_severity, format_json, format_sarif, format_terminal, SummaryStats,
+};
+use exspec_core::rules::{
+    evaluate_file_rules, evaluate_project_rules, evaluate_rules, Config, Severity,
+};
 use exspec_lang_php::PhpExtractor;
 use exspec_lang_python::PythonExtractor;
 use exspec_lang_rust::RustExtractor;
@@ -31,6 +35,10 @@ pub struct Cli {
     /// Treat WARN as errors (exit 1)
     #[arg(long)]
     pub strict: bool,
+
+    /// Minimum severity to display (info, warn, block)
+    #[arg(long)]
+    pub min_severity: Option<String>,
 
     /// Path to config file
     #[arg(long, default_value = ".exspec.toml")]
@@ -232,7 +240,22 @@ fn main() {
         process::exit(1);
     }
 
-    let config = load_config(&cli.config);
+    let cli_min_severity = if let Some(ref s) = cli.min_severity {
+        match s.parse::<Severity>() {
+            Ok(sev) => Some(sev),
+            Err(e) => {
+                eprintln!("error: {e}");
+                process::exit(2);
+            }
+        }
+    } else {
+        None
+    };
+
+    let mut config = load_config(&cli.config);
+    if let Some(sev) = cli_min_severity {
+        config.min_severity = sev;
+    }
     let py_extractor = PythonExtractor::new();
     let ts_extractor = TypeScriptExtractor::new();
     let php_extractor = PhpExtractor::new();
@@ -293,16 +316,33 @@ fn main() {
 
     let metrics = compute_metrics(&all_analyses, source_file_count);
 
+    let display_diagnostics = filter_by_severity(&diagnostics, config.min_severity);
+
     let output = match cli.format.as_str() {
-        "json" => format_json(&diagnostics, test_file_count, all_functions.len(), &metrics),
-        "sarif" => format_sarif(&diagnostics),
-        _ => format_terminal(&diagnostics, test_file_count, all_functions.len(), &metrics),
+        "json" => {
+            let stats = SummaryStats::from_diagnostics(&diagnostics, all_functions.len());
+            format_json(
+                &display_diagnostics,
+                test_file_count,
+                all_functions.len(),
+                &metrics,
+                Some(&stats),
+            )
+        }
+        "sarif" => format_sarif(&display_diagnostics),
+        _ => format_terminal(
+            &display_diagnostics,
+            test_file_count,
+            all_functions.len(),
+            &metrics,
+        ),
     };
 
     if !output.is_empty() {
         println!("{output}");
     }
 
+    // Exit code uses UNFILTERED diagnostics
     let exit_code = compute_exit_code(&diagnostics, cli.strict);
     process::exit(exit_code);
 }
@@ -358,6 +398,20 @@ mod tests {
     fn cli_config_default() {
         let cli = Cli::try_parse_from(["exspec"]).unwrap();
         assert_eq!(cli.config, ".exspec.toml");
+    }
+
+    // --- #59: --min-severity CLI ---
+
+    #[test]
+    fn cli_min_severity_option() {
+        let cli = Cli::try_parse_from(["exspec", "--min-severity", "warn", "."]).unwrap();
+        assert_eq!(cli.min_severity, Some("warn".to_string()));
+    }
+
+    #[test]
+    fn cli_min_severity_default_none() {
+        let cli = Cli::try_parse_from(["exspec"]).unwrap();
+        assert_eq!(cli.min_severity, None);
     }
 
     // --- Python file discovery ---
@@ -1501,8 +1555,13 @@ mod tests {
         let analyses = vec![extractor.extract_file_analysis(&source, &path)];
         let metrics = exspec_core::metrics::compute_metrics(&analyses, 1);
         let diags = evaluate_rules(&analyses[0].functions, &Config::default());
-        let output =
-            exspec_core::output::format_json(&diags, 1, analyses[0].functions.len(), &metrics);
+        let output = exspec_core::output::format_json(
+            &diags,
+            1,
+            analyses[0].functions.len(),
+            &metrics,
+            None,
+        );
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["metrics"].is_object());
         assert!(parsed["metrics"]["assertion_density_avg"].is_number());

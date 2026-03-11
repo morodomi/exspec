@@ -1,7 +1,7 @@
 ---
 feature: lang-python
 cycle: pytest-fail-oracle
-phase: GREEN
+phase: DONE
 complexity: trivial
 test_count: 2
 risk_level: low
@@ -131,4 +131,4 @@ Side effects (by design):
 3. [Done] GREEN
 4. [Done] REFACTOR
 5. [Done] REVIEW
-6. [Next] COMMIT
+6. [Done] COMMIT <- Complete (0d1cc78)

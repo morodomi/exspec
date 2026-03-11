@@ -38,7 +38,7 @@ impl FromStr for Severity {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
+        match s.to_ascii_uppercase().as_str() {
             "BLOCK" => Ok(Severity::Block),
             "WARN" => Ok(Severity::Warn),
             "INFO" => Ok(Severity::Info),
@@ -83,6 +83,7 @@ pub struct Config {
     pub disabled_rules: Vec<RuleId>,
     pub custom_assertion_patterns: Vec<String>,
     pub ignore_patterns: Vec<String>,
+    pub min_severity: Severity,
 }
 
 impl Default for Config {
@@ -98,6 +99,7 @@ impl Default for Config {
             disabled_rules: Vec::new(),
             custom_assertion_patterns: Vec::new(),
             ignore_patterns: Vec::new(),
+            min_severity: Severity::Info,
         }
     }
 }
@@ -535,6 +537,33 @@ mod tests {
     #[test]
     fn severity_from_str_invalid() {
         assert!(Severity::from_str("UNKNOWN").is_err());
+    }
+
+    // --- #59: case-insensitive FromStr ---
+
+    #[test]
+    fn severity_from_str_lowercase_block() {
+        assert_eq!(Severity::from_str("block").unwrap(), Severity::Block);
+    }
+
+    #[test]
+    fn severity_from_str_mixed_case_block() {
+        assert_eq!(Severity::from_str("Block").unwrap(), Severity::Block);
+    }
+
+    #[test]
+    fn severity_from_str_lowercase_warn() {
+        assert_eq!(Severity::from_str("warn").unwrap(), Severity::Warn);
+    }
+
+    #[test]
+    fn severity_from_str_lowercase_info() {
+        assert_eq!(Severity::from_str("info").unwrap(), Severity::Info);
+    }
+
+    #[test]
+    fn severity_from_str_invalid_word() {
+        assert!(Severity::from_str("invalid").is_err());
     }
 
     #[test]

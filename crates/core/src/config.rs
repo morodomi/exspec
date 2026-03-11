@@ -1,6 +1,8 @@
+use std::str::FromStr;
+
 use serde::Deserialize;
 
-use crate::rules::{Config, RuleId};
+use crate::rules::{Config, RuleId, Severity};
 
 #[derive(Debug, Deserialize, Default)]
 pub struct ExspecConfig {
@@ -14,6 +16,13 @@ pub struct ExspecConfig {
     pub paths: PathsConfig,
     #[serde(default)]
     pub assertions: AssertionsConfig,
+    #[serde(default)]
+    pub output: OutputConfig,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct OutputConfig {
+    pub min_severity: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -90,6 +99,17 @@ impl From<ExspecConfig> for Config {
             disabled_rules: ec.rules.disable.iter().map(|s| RuleId::new(s)).collect(),
             custom_assertion_patterns: ec.assertions.custom_patterns,
             ignore_patterns: ec.paths.ignore,
+            min_severity: ec
+                .output
+                .min_severity
+                .as_deref()
+                .map(|s| {
+                    Severity::from_str(s).unwrap_or_else(|_| {
+                        eprintln!("warning: invalid min_severity '{s}', using default");
+                        defaults.min_severity
+                    })
+                })
+                .unwrap_or(defaults.min_severity),
         }
     }
 }
@@ -323,6 +343,53 @@ mod tests {
         let ec = ExspecConfig::default();
         let config: Config = ec.into();
         assert!(config.ignore_patterns.is_empty());
+    }
+
+    // --- #59: OutputConfig parsing ---
+
+    #[test]
+    fn parse_output_min_severity() {
+        let content = fixture("min_severity.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        assert_eq!(ec.output.min_severity, Some("warn".to_string()));
+    }
+
+    #[test]
+    fn parse_config_without_output_section() {
+        let content = fixture("empty.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        assert_eq!(ec.output.min_severity, None);
+    }
+
+    #[test]
+    fn convert_output_min_severity_block() {
+        let ec = ExspecConfig {
+            output: OutputConfig {
+                min_severity: Some("BLOCK".to_string()),
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(config.min_severity, Severity::Block);
+    }
+
+    #[test]
+    fn convert_no_min_severity_defaults_to_info() {
+        let ec = ExspecConfig::default();
+        let config: Config = ec.into();
+        assert_eq!(config.min_severity, Severity::Info);
+    }
+
+    #[test]
+    fn convert_invalid_min_severity_string_falls_back_to_info() {
+        let ec = ExspecConfig {
+            output: OutputConfig {
+                min_severity: Some("BLOKC".to_string()),
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(config.min_severity, Severity::Info);
     }
 
     #[test]

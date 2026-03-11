@@ -114,21 +114,33 @@ pub fn format_json(
     file_count: usize,
     function_count: usize,
     metrics: &ProjectMetrics,
+    unfiltered_summary: Option<&SummaryStats>,
 ) -> String {
-    let block_count = diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Block)
-        .count();
-    let warn_count = diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Warn)
-        .count();
-    let info_count = diagnostics
-        .iter()
-        .filter(|d| d.severity == Severity::Info)
-        .count();
-    let violated = count_violated_functions(diagnostics);
-    let pass_count = function_count.saturating_sub(violated);
+    let (block_count, warn_count, info_count, pass_count) = if let Some(stats) = unfiltered_summary
+    {
+        (
+            stats.block_count,
+            stats.warn_count,
+            stats.info_count,
+            stats.pass_count,
+        )
+    } else {
+        let block_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Block)
+            .count();
+        let warn_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warn)
+            .count();
+        let info_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Info)
+            .count();
+        let violated = count_violated_functions(diagnostics);
+        let pass_count = function_count.saturating_sub(violated);
+        (block_count, warn_count, info_count, pass_count)
+    };
 
     let mut output = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -305,6 +317,49 @@ pub fn format_sarif(diagnostics: &[Diagnostic]) -> String {
     serde_json::to_string_pretty(&sarif_doc).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// Filter diagnostics to only include those at or above the given minimum severity.
+pub fn filter_by_severity(diagnostics: &[Diagnostic], min: Severity) -> Vec<Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|d| d.severity >= min)
+        .cloned()
+        .collect()
+}
+
+/// Summary statistics from unfiltered diagnostics, for JSON/SARIF output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryStats {
+    pub block_count: usize,
+    pub warn_count: usize,
+    pub info_count: usize,
+    pub pass_count: usize,
+}
+
+impl SummaryStats {
+    pub fn from_diagnostics(diagnostics: &[Diagnostic], function_count: usize) -> Self {
+        let block_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Block)
+            .count();
+        let warn_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warn)
+            .count();
+        let info_count = diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Info)
+            .count();
+        let violated = count_violated_functions(diagnostics);
+        let pass_count = function_count.saturating_sub(violated);
+        Self {
+            block_count,
+            warn_count,
+            info_count,
+            pass_count,
+        }
+    }
+}
+
 pub fn compute_exit_code(diagnostics: &[Diagnostic], strict: bool) -> i32 {
     for d in diagnostics {
         if d.severity == Severity::Block {
@@ -399,7 +454,7 @@ mod tests {
 
     #[test]
     fn json_format_has_version_and_summary() {
-        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["version"].is_string());
         assert!(parsed["summary"].is_object());
@@ -412,7 +467,7 @@ mod tests {
 
     #[test]
     fn json_format_has_diagnostics_and_metrics() {
-        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["diagnostics"].is_array());
         assert!(parsed["metrics"].is_object());
@@ -421,7 +476,7 @@ mod tests {
 
     #[test]
     fn json_format_empty() {
-        let output = format_json(&[], 0, 0, &ProjectMetrics::default());
+        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["diagnostics"].as_array().unwrap().len(), 0);
         assert_eq!(parsed["summary"]["functions"], 0);
@@ -442,7 +497,7 @@ mod tests {
 
     #[test]
     fn json_format_zero_files_has_guidance() {
-        let output = format_json(&[], 0, 0, &ProjectMetrics::default());
+        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["guidance"].is_string());
     }
@@ -587,7 +642,7 @@ mod tests {
             contract_coverage: 0.1,
             test_source_ratio: 0.8,
         };
-        let output = format_json(&[], 1, 1, &metrics);
+        let output = format_json(&[], 1, 1, &metrics, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let m = &parsed["metrics"];
         assert_eq!(m["mock_density_avg"], 1.5);
@@ -606,7 +661,7 @@ mod tests {
             mock_class_max: 3,
             ..Default::default()
         };
-        let output = format_json(&[], 1, 1, &metrics);
+        let output = format_json(&[], 1, 1, &metrics, None);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["metrics"]["mock_density_avg"].is_number());
         assert!(parsed["metrics"]["mock_class_max"].is_number());
@@ -734,6 +789,85 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(rules.len(), 16);
+    }
+
+    // --- #59: filter_by_severity ---
+
+    #[test]
+    fn filter_by_severity_block_keeps_only_block() {
+        let diags = vec![block_diag(), warn_diag(), info_diag()];
+        let filtered = filter_by_severity(&diags, Severity::Block);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].severity, Severity::Block);
+    }
+
+    #[test]
+    fn filter_by_severity_warn_keeps_block_and_warn() {
+        let diags = vec![block_diag(), warn_diag(), info_diag()];
+        let filtered = filter_by_severity(&diags, Severity::Warn);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn filter_by_severity_info_keeps_all() {
+        let diags = vec![block_diag(), warn_diag(), info_diag()];
+        let filtered = filter_by_severity(&diags, Severity::Info);
+        assert_eq!(filtered.len(), 3);
+    }
+
+    #[test]
+    fn filter_by_severity_empty_input() {
+        let filtered = filter_by_severity(&[], Severity::Block);
+        assert!(filtered.is_empty());
+    }
+
+    // --- #59: SummaryStats ---
+
+    #[test]
+    fn summary_stats_from_diagnostics() {
+        let diags = vec![block_diag(), warn_diag(), info_diag()];
+        let stats = SummaryStats::from_diagnostics(&diags, 5);
+        assert_eq!(stats.block_count, 1);
+        assert_eq!(stats.warn_count, 1);
+        assert_eq!(stats.info_count, 1);
+        // 3 distinct (file,line) violated out of 5 → pass=3 except info_diag has line=None
+        // block_diag line=10, warn_diag line=5, info_diag line=None → 2 violated → pass=3
+        assert_eq!(stats.pass_count, 3);
+    }
+
+    // --- #59: Terminal filtered score ---
+
+    #[test]
+    fn terminal_format_filtered_shows_filtered_counts() {
+        let filtered = vec![block_diag()]; // original had block+warn+info but filtered to block only
+        let output = format_terminal(&filtered, 1, 3, &ProjectMetrics::default());
+        assert!(
+            output.contains("BLOCK 1 | WARN 0 | INFO 0"),
+            "score should reflect filtered diagnostics: {output}"
+        );
+        assert!(!output.contains("WARN test.py"));
+    }
+
+    // --- #59: JSON filtered array + unfiltered summary ---
+
+    #[test]
+    fn json_filtered_diagnostics_with_unfiltered_summary() {
+        let filtered = vec![block_diag()];
+        let stats = SummaryStats {
+            block_count: 1,
+            warn_count: 1,
+            info_count: 1,
+            pass_count: 2,
+        };
+        let output = format_json(&filtered, 1, 5, &ProjectMetrics::default(), Some(&stats));
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(
+            parsed["diagnostics"].as_array().unwrap().len(),
+            1,
+            "diagnostics should be filtered"
+        );
+        assert_eq!(parsed["summary"]["warn"], 1, "summary should be unfiltered");
+        assert_eq!(parsed["summary"]["info"], 1, "summary should be unfiltered");
     }
 
     #[test]
