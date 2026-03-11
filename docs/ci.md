@@ -44,6 +44,14 @@ Use `--strict` to also fail on WARN:
 - run: exspec --strict .
 ```
 
+Use `--min-severity` to reduce noise in CI logs without changing exit behavior:
+
+```yaml
+- run: exspec --min-severity warn .   # hide INFO, still exit 1 on BLOCK
+```
+
+`--min-severity` is a display filter only. BLOCK violations still cause a non-zero exit regardless of the filter setting.
+
 ## Recommended: start without failing
 
 For existing codebases, start by running exspec without failing the build. Review the output and configure `.exspec.toml` before enforcing:

@@ -2,7 +2,7 @@
 
 Static analyzer for test design quality. Verifies that tests function as executable specifications -- fast, language-agnostic, zero LLM cost.
 
-> **Public beta** (v0.1.0). Dogfooded across 10 projects / 4 languages / ~25,000 tests. Not production-ready -- rule IDs, severity levels, and config format may change.
+> **Public beta** (v0.1.1). Dogfooded across 10 projects / 4 languages / ~25,000 tests. Not production-ready -- rule IDs, severity levels, and config format may change.
 
 ## Why exspec?
 
@@ -36,7 +36,7 @@ exspec --strict .                     # WARN also fails
 Example output:
 
 ```
-exspec v0.1.0 -- 8 test files, 10 test functions
+exspec v0.1.1 -- 8 test files, 10 test functions
 BLOCK tests/test_example.py:5 T001 assertion-free: test has no assertions
 WARN  tests/test_example.py:20 T002 mock-overuse: 6 mocks (6 classes), threshold: 5 mocks / 3 classes
 Score: BLOCK 1 | WARN 1 | INFO 0 | PASS 8
@@ -87,6 +87,27 @@ For projects with custom assertion helpers, add them to avoid T001 false positiv
 ```toml
 [assertions]
 custom_patterns = ["assertJsonStructure", "self.assertValid"]
+```
+
+### Tuning Severity
+
+Two independent mechanisms control what you see:
+
+- **`[rules.severity]`** changes how a rule is *evaluated*. `T107 = "off"` disables the rule entirely; `T101 = "info"` downgrades it from WARN to INFO.
+- **`--min-severity`** controls *display filtering*. `--min-severity warn` hides INFO diagnostics from the output but does not change evaluation or exit codes.
+
+```toml
+# .exspec.toml
+[rules.severity]
+T107 = "off"      # disable T107 entirely
+T101 = "info"     # downgrade T101 to informational
+
+[output]
+min_severity = "warn"  # hide INFO in terminal/JSON output
+```
+
+```bash
+exspec --min-severity warn .   # CLI equivalent of [output] min_severity
 ```
 
 ## CI Integration
