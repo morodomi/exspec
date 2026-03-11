@@ -1,0 +1,6 @@
+[rules]
+disable = ["T004"]
+
+[rules.severity]
+T107 = "off"
+T101 = "info"

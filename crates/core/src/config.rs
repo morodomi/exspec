@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use serde::Deserialize;
@@ -41,6 +42,8 @@ pub struct GeneralConfig {
 pub struct RulesConfig {
     #[serde(default)]
     pub disable: Vec<String>,
+    #[serde(default)]
+    pub severity: HashMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -68,9 +71,44 @@ impl ExspecConfig {
     }
 }
 
+/// Known rule IDs for validation.
+const KNOWN_RULES: &[&str] = &[
+    "T001", "T002", "T003", "T004", "T005", "T006", "T007", "T008", "T101", "T102", "T103", "T105",
+    "T106", "T107", "T108", "T109",
+];
+
 impl From<ExspecConfig> for Config {
     fn from(ec: ExspecConfig) -> Self {
         let defaults = Config::default();
+
+        let mut disabled_rules: Vec<RuleId> =
+            ec.rules.disable.iter().map(|s| RuleId::new(s)).collect();
+        let mut severity_overrides = HashMap::new();
+
+        for (rule_id, severity_str) in &ec.rules.severity {
+            if !KNOWN_RULES.contains(&rule_id.as_str()) {
+                eprintln!("warning: unknown rule '{rule_id}' in [rules.severity] config");
+                continue;
+            }
+
+            if severity_str.eq_ignore_ascii_case("off") {
+                if !disabled_rules.iter().any(|r| r.0 == *rule_id) {
+                    disabled_rules.push(RuleId::new(rule_id));
+                }
+            } else {
+                match Severity::from_str(severity_str) {
+                    Ok(sev) => {
+                        severity_overrides.insert(rule_id.clone(), sev);
+                    }
+                    Err(_) => {
+                        eprintln!(
+                            "warning: invalid severity '{severity_str}' for rule {rule_id}, skipping"
+                        );
+                    }
+                }
+            }
+        }
+
         Config {
             mock_max: ec.thresholds.mock_max.unwrap_or(defaults.mock_max),
             mock_class_max: ec
@@ -96,7 +134,7 @@ impl From<ExspecConfig> for Config {
                 .thresholds
                 .min_duplicate_count
                 .unwrap_or(defaults.min_duplicate_count),
-            disabled_rules: ec.rules.disable.iter().map(|s| RuleId::new(s)).collect(),
+            disabled_rules,
             custom_assertion_patterns: ec.assertions.custom_patterns,
             ignore_patterns: ec.paths.ignore,
             min_severity: ec
@@ -110,6 +148,7 @@ impl From<ExspecConfig> for Config {
                     })
                 })
                 .unwrap_or(defaults.min_severity),
+            severity_overrides,
         }
     }
 }
@@ -390,6 +429,110 @@ mod tests {
         };
         let config: Config = ec.into();
         assert_eq!(config.min_severity, Severity::Info);
+    }
+
+    // --- #60: Per-rule severity override ---
+
+    #[test]
+    fn parse_severity_override_toml() {
+        let content = fixture("severity_override.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        assert_eq!(ec.rules.severity.get("T107").unwrap(), "off");
+        assert_eq!(ec.rules.severity.get("T101").unwrap(), "info");
+    }
+
+    #[test]
+    fn convert_severity_off_adds_to_disabled_rules() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T107".to_string(), "off".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T107"));
+        assert!(!config.severity_overrides.contains_key("T107"));
+    }
+
+    #[test]
+    fn convert_severity_valid_adds_to_overrides() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T101".to_string(), "info".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(config.severity_overrides.get("T101"), Some(&Severity::Info));
+    }
+
+    #[test]
+    fn convert_severity_invalid_string_skipped() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T001".to_string(), "blokc".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert!(!config.severity_overrides.contains_key("T001"));
+    }
+
+    #[test]
+    fn convert_severity_backward_compat_disable_and_off() {
+        let content = fixture("severity_override.toml");
+        let ec = ExspecConfig::from_toml(&content).unwrap();
+        let config: Config = ec.into();
+        // T004 from disable, T107 from severity "off"
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T004"));
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T107"));
+    }
+
+    #[test]
+    fn convert_severity_dedup_disable_and_off() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T107".to_string(), "off".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                disable: vec!["T107".to_string()],
+                severity,
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        let count = config
+            .disabled_rules
+            .iter()
+            .filter(|r| r.0 == "T107")
+            .count();
+        assert_eq!(
+            count, 1,
+            "T107 should appear exactly once in disabled_rules"
+        );
+    }
+
+    #[test]
+    fn convert_severity_unknown_rule_discarded() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T999".to_string(), "warn".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert!(!config.severity_overrides.contains_key("T999"));
     }
 
     #[test]

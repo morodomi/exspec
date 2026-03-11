@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -84,6 +85,7 @@ pub struct Config {
     pub custom_assertion_patterns: Vec<String>,
     pub ignore_patterns: Vec<String>,
     pub min_severity: Severity,
+    pub severity_overrides: HashMap<String, Severity>,
 }
 
 impl Default for Config {
@@ -100,6 +102,7 @@ impl Default for Config {
             custom_assertion_patterns: Vec::new(),
             ignore_patterns: Vec::new(),
             min_severity: Severity::Info,
+            severity_overrides: HashMap::new(),
         }
     }
 }
@@ -119,7 +122,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T001"),
-                severity: Severity::Block,
+                severity: effective_severity(config, "T001", Severity::Block),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!("assertion-free: {} has no assertions", func.name),
@@ -135,7 +138,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T002"),
-                severity: Severity::Warn,
+                severity: effective_severity(config, "T002", Severity::Warn),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -156,7 +159,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T003"),
-                severity: Severity::Warn,
+                severity: effective_severity(config, "T003", Severity::Warn),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -174,7 +177,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T102"),
-                severity: Severity::Warn,
+                severity: effective_severity(config, "T102", Severity::Warn),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -189,7 +192,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         if !is_disabled(config, "T108") && !is_suppressed(analysis, "T108") && analysis.has_wait {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T108"),
-                severity: Severity::Warn,
+                severity: effective_severity(config, "T108", Severity::Warn),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: "wait-and-see: test uses sleep/delay (causes flaky tests, consider async/mock alternatives)".to_string(),
@@ -204,7 +207,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T106"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T106", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -223,7 +226,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T107"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T107", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -241,7 +244,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T109"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T109", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -259,7 +262,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T101"),
-                severity: Severity::Warn,
+                severity: effective_severity(config, "T101", Severity::Warn),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -304,7 +307,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
                 if density < 1.0 {
                     diagnostics.push(Diagnostic {
                         rule: RuleId::new("T006"),
-                        severity: Severity::Warn,
+                        severity: effective_severity(config, "T006", Severity::Warn),
                         file: analysis.file.clone(),
                         line: None,
                         message: format!(
@@ -323,7 +326,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
             if ratio < config.parameterized_min_ratio {
                 diagnostics.push(Diagnostic {
                     rule: RuleId::new("T004"),
-                    severity: Severity::Info,
+                    severity: effective_severity(config, "T004", Severity::Info),
                     file: analysis.file.clone(),
                     line: None,
                     message: format!(
@@ -342,7 +345,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
         if !is_disabled(config, "T005") && !analysis.has_pbt_import {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T005"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T005", Severity::Info),
                 file: analysis.file.clone(),
                 line: None,
                 message: "pbt-missing: no property-based testing library imported".to_string(),
@@ -354,7 +357,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
         if !is_disabled(config, "T008") && !analysis.has_contract_import {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T008"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T008", Severity::Info),
                 file: analysis.file.clone(),
                 line: None,
                 message: "no-contract: no contract/schema library imported".to_string(),
@@ -374,7 +377,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
             {
                 diagnostics.push(Diagnostic {
                     rule: RuleId::new("T105"),
-                    severity: Severity::Info,
+                    severity: effective_severity(config, "T105", Severity::Info),
                     file: analysis.file.clone(),
                     line: None,
                     message: format!(
@@ -389,7 +392,7 @@ pub fn evaluate_file_rules(analyses: &[FileAnalysis], config: &Config) -> Vec<Di
         if !is_disabled(config, "T103") && !analysis.has_error_test {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T103"),
-                severity: Severity::Info,
+                severity: effective_severity(config, "T103", Severity::Info),
                 file: analysis.file.clone(),
                 line: None,
                 message: "missing-error-test: no error/exception test found in file".to_string(),
@@ -413,7 +416,7 @@ pub fn evaluate_project_rules(
         let ratio = test_file_count as f64 / source_file_count as f64;
         diagnostics.push(Diagnostic {
             rule: RuleId::new("T007"),
-            severity: Severity::Info,
+            severity: effective_severity(config, "T007", Severity::Info),
             file: "<project>".to_string(),
             line: None,
             message: format!(
@@ -485,6 +488,14 @@ pub fn is_undescriptive_test_name(name: &str) -> bool {
 
     // Generic blacklist
     GENERIC_TEST_NAMES.contains(&suffix)
+}
+
+fn effective_severity(config: &Config, rule_id: &str, default: Severity) -> Severity {
+    config
+        .severity_overrides
+        .get(rule_id)
+        .copied()
+        .unwrap_or(default)
 }
 
 fn is_disabled(config: &Config, rule_id: &str) -> bool {
@@ -1866,5 +1877,87 @@ mod tests {
             .filter(|d| d.rule == RuleId::new("T106"))
             .collect();
         assert!(t106.is_empty(), "count=4 with threshold=5 should not fire");
+    }
+
+    // --- #60: effective_severity ---
+
+    #[test]
+    fn effective_severity_returns_override_when_present() {
+        let mut overrides = HashMap::new();
+        overrides.insert("T001".to_string(), Severity::Info);
+        let config = Config {
+            severity_overrides: overrides,
+            ..Default::default()
+        };
+        assert_eq!(
+            effective_severity(&config, "T001", Severity::Block),
+            Severity::Info
+        );
+    }
+
+    #[test]
+    fn effective_severity_returns_default_when_no_override() {
+        let config = Config::default();
+        assert_eq!(
+            effective_severity(&config, "T001", Severity::Block),
+            Severity::Block
+        );
+    }
+
+    #[test]
+    fn integration_t107_severity_overridden_to_warn() {
+        let funcs = vec![make_func(
+            "test_something",
+            TestAnalysis {
+                assertion_count: 3,
+                assertion_message_count: 0,
+                ..Default::default()
+            },
+        )];
+        let mut overrides = HashMap::new();
+        overrides.insert("T107".to_string(), Severity::Warn);
+        let config = Config {
+            severity_overrides: overrides,
+            ..Default::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t107: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T107"))
+            .collect();
+        assert_eq!(t107.len(), 1);
+        assert_eq!(
+            t107[0].severity,
+            Severity::Warn,
+            "T107 should be overridden to Warn"
+        );
+    }
+
+    #[test]
+    fn integration_t001_severity_overridden_to_warn() {
+        let funcs = vec![make_func(
+            "test_no_assertions",
+            TestAnalysis {
+                assertion_count: 0,
+                ..Default::default()
+            },
+        )];
+        let mut overrides = HashMap::new();
+        overrides.insert("T001".to_string(), Severity::Warn);
+        let config = Config {
+            severity_overrides: overrides,
+            ..Default::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        let t001: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T001"))
+            .collect();
+        assert_eq!(t001.len(), 1);
+        assert_eq!(
+            t001[0].severity,
+            Severity::Warn,
+            "T001 should be overridden to Warn"
+        );
     }
 }

@@ -17,6 +17,10 @@ lang = ["python", "typescript"]
 [rules]
 disable = ["T004"]
 
+[rules.severity]
+T107 = "off"
+T101 = "info"
+
 [thresholds]
 mock_max = 5
 mock_class_max = 3
@@ -44,6 +48,28 @@ custom_patterns = ["assertJsonStructure", "self.assertValid"]
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `disable` | string[] | `[]` | Rule IDs to disable |
+
+### `[rules.severity]`
+
+Override the default severity for specific rules.
+
+```toml
+[rules.severity]
+T107 = "off"     # disable rule entirely (equivalent to adding to disable)
+T101 = "info"    # downgrade from warn to info
+T001 = "block"   # explicit default (no-op)
+```
+
+| Value | Effect |
+|-------|--------|
+| `"off"` | Skip evaluation entirely (same as `disable`) |
+| `"info"` | Report as INFO |
+| `"warn"` | Report as WARN |
+| `"block"` | Report as BLOCK (exit code 1) |
+
+This is orthogonal to `--min-severity` / `[output] min_severity`: severity overrides change *evaluation*, while `min_severity` controls *display filtering*.
+
+> **Caution**: Downgrading BLOCK rules (e.g. T001) removes the safety net for assertion-free tests. Use with care.
 
 ### `[thresholds]`
 
