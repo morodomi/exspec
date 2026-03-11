@@ -387,6 +387,47 @@ Test detection worked well (1455/~1577 `#[test]` detected). `#[should_panic]` (7
 | T006 (low-assertion-density) | 38 | 2.4% |
 | T101 (how-not-what) | 8 | 0.5% |
 
+## T101 Triage Experience: AWS Cognito Wrapper Tests (2026-03-10)
+
+**Project**: Internal Next.js app, `cognito.test.ts` (11 test functions, 19 T101 hits)
+**Context**: AWS SDK thin wrapper module. Tests verify parameter passthrough via constructor spies.
+
+### Pattern Classification
+
+Real-world T101 triage revealed 4 distinct categories with different appropriate responses:
+
+| Category | Example | Count | Action | Rationale |
+|----------|---------|-------|--------|-----------|
+| Command construction spy | `expect(SignUpCommand).toHaveBeenCalledWith({...})` | 8 | KEEP + suppress | Wrapper's core behavior; parameter passthrough is the specification |
+| Redundant mockSend | `expect(mockSend).toHaveBeenCalled()` + result assertion | 2 | DELETE | Result assertion already proves send was called |
+| Fire-and-forget mockSend | `expect(mockSend).toHaveBeenCalled()` on void function | 5 | KEEP + suppress | No return value; send execution is the only observable evidence |
+| Console.error spy | `expect(consoleSpy).toHaveBeenCalledWith(...)` | 1 | KEEP + suppress | Observable side-effect (logging) is part of error handling spec |
+
+### Key Insight: "Redundant spy" vs "Sole verification"
+
+The critical distinction is whether the test has **behavior assertions alongside the spy**:
+
+- **spy + result assertion** = spy is redundant (if `result` is correct, `send` must have been called)
+- **spy only (void function)** = spy is the sole verification, removing it loses test coverage
+
+This maps directly to data exspec already has: `assertion_count` vs `how_not_what_count`.
+
+### Potential Improvement: Contextual T101 Diagnostic
+
+Current message: `"how-not-what: 2 implementation-testing pattern(s) detected"`
+
+Enhanced message could distinguish:
+- `assertion_count > how_not_what_count`: "test also has behavior assertions; mock checks may be redundant"
+- `assertion_count == how_not_what_count`: "test has no behavior assertions beyond mock checks"
+
+This stays within static analysis scope (no type/return-value analysis needed) and directly aids triage decisions. **Not yet implemented**; tracked here as a potential enhancement.
+
+### Result
+
+- 2 redundant spy lines deleted (genuine improvement)
+- 11 functions annotated with `// exspec-ignore: T101` (legitimate patterns)
+- cognito.test.ts T101 warnings: 19 → 0
+
 ## Reproduction
 
 ```bash
