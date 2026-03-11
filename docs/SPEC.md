@@ -67,6 +67,14 @@ BLOCK tests/test_api.py:1  T001 assertion-free
 - tree-sitter query: テスト関数のbody内に `assert`, `assertEqual`, `assertRaises`, `expect(`, `.should`, `.toBe`, `.toEqual` 等が存在しない
 - scm: `assertion.scm` のマッチが0件
 
+**Python assertion patterns** (assertion.scm):
+- `assert` statement
+- `self.assert*()` (unittest)
+- `pytest.raises()` — exception verification
+- `mock.assert_*()` (unittest.mock)
+- `pytest.warns()` — warning verification
+- `pytest.fail()` — explicit failure oracle (unconditionally fails the test)
+
 ---
 
 ### T002: mock-overuse

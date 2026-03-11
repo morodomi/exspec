@@ -32,3 +32,12 @@
     attribute: (identifier) @_pytest_warns_attr)
   (#eq? @_pytest_warns_obj "pytest")
   (#eq? @_pytest_warns_attr "warns")) @assertion
+
+; pytest.fail() — explicit failure oracle counts as assertion
+; unconditionally fails the test with a message (functionally equivalent to `assert False, msg`)
+(call
+  function: (attribute
+    object: (identifier) @_pytest_fail_obj
+    attribute: (identifier) @_pytest_fail_attr)
+  (#eq? @_pytest_fail_obj "pytest")
+  (#eq? @_pytest_fail_attr "fail")) @assertion

@@ -112,7 +112,7 @@ Laravel FacadeはPHPの静的メソッド呼び出し構文を使う。tree-sitt
 - Phase completed
 
 ### 2026-03-11 10:53 - COMMIT
-- Committed: (pending)
+- Committed: f79e0ed
 - Phase completed
 
 ---

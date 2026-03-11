@@ -1398,6 +1398,36 @@ mod tests {
         );
     }
 
+    // --- T001 FP fix: pytest.fail() (#57) ---
+
+    #[test]
+    fn t001_pytest_fail_counts_as_assertion() {
+        // TC-01: pytest.fail() only -> T001 should NOT fire
+        let source = fixture("t001_pytest_fail.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_fail.py");
+        assert_eq!(funcs.len(), 2);
+        assert!(
+            funcs[0].analysis.assertion_count >= 1,
+            "pytest.fail() should count as assertion, got {}",
+            funcs[0].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_no_assertions_still_fires() {
+        // TC-02: no assertions, no pytest.fail() -> T001 BLOCK (control case)
+        let source = fixture("t001_pytest_fail.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pytest_fail.py");
+        assert_eq!(funcs.len(), 2);
+        assert_eq!(
+            funcs[1].analysis.assertion_count, 0,
+            "test_no_assertions should have 0 assertions, got {}",
+            funcs[1].analysis.assertion_count
+        );
+    }
+
     // --- T001 FP fix: mock.assert_*() methods (#38) ---
 
     #[test]
