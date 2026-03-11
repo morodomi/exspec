@@ -1500,7 +1500,7 @@ mod tests {
         );
     }
 
-    // --- #62: T001 FP fix: obj.assert*() without underscore ---
+    // --- T001 FP fix: obj.assert*() without underscore (#62) ---
 
     #[test]
     fn t001_assert_no_underscore_counts_as_assertion() {
