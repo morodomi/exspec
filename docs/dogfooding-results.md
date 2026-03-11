@@ -22,6 +22,9 @@ exspec version: 0.1.0 (commit 5957cd0)
 | ripgrep | Rust | 16 (of ~346) | 0 | 0% | ~330 tests in `rgtest!` macro not detected (token_tree) |
 | tokio | Rust | 1582 | 388 | 33.8% (131/388) | custom assert macros (124), select! token_tree (7) |
 | clap | Rust | 1455 | 528 | 41.3% (218/528) | assert_data_eq! macro (115), helper delegation (103) |
+| django | Python | 1047 | 23 | 39% (9/23) | helper delegation (self.check_output, etc.) |
+| pytest | Python | 2380 | 594 | ~100% (est.) | `obj.assertX()` without underscore (#62), fnmatch_lines() helper |
+| symfony | PHP | 17148 | 759 | ~24% (182/759) | addToAssertionCount() (#63, 91), markTestSkipped() (#64, 91) |
 
 ### Acceptance Criteria Status
 
@@ -428,6 +431,104 @@ This stays within static analysis scope (no type/return-value analysis needed) a
 - 11 functions annotated with `// exspec-ignore: T101` (legitimate patterns)
 - cognito.test.ts T101 warnings: 19 → 0
 
+## Django Dogfooding (2026-03-11)
+
+**1,047 tests, 617 files, 23 T001 BLOCK. FP rate: 39% (9/23).**
+
+### BLOCK Breakdown
+
+| Category | Count | Type | Notes |
+|----------|-------|------|-------|
+| Implicit no-exception assertion | 8 | TP | test body runs code, success = no exception |
+| Helper delegation (self.check_output, self.check_html) | 8 | FP | Custom assertion helpers not detected |
+| Decorator wrapping | 1 | FP | @test_mutation() injects assertion logic |
+| Pass-only / non-test | 2 | TP | Explicit pass statement or function name misleading |
+| Assertion in nested block | 1 | TP | assert in if/elif not counted |
+
+### Key Findings
+
+1. **self.assert*() detection works**: Django's TestCase assertion methods (assertContains, assertRedirects, etc.) are correctly detected. No query-level FP from this pattern.
+2. **FPs are all helper delegation** (known pattern): `self.check_output()`, `self.check_html()`, `_test_argon2_upgrade()`. Mitigated by `custom_patterns`.
+3. **No new FP categories found**. Django is well-served by existing detection.
+
+### WARN Summary
+
+| Rule | Count | % of Tests |
+|------|-------|-----------|
+| T101 (how-not-what) | 30 | 2.9% |
+| T003 (giant-test) | 8 | 0.8% |
+| T006 (low-assertion-density) | 1 | 0.1% |
+
+## pytest Dogfooding (2026-03-11)
+
+**2,380 tests, 108 files, 594 T001 BLOCK. FP rate: ~100%.**
+
+### BLOCK Breakdown
+
+| Category | Count (est.) | Type | Notes |
+|----------|-------------|------|-------|
+| `result.stdout.fnmatch_lines()` | 415 | FP | Helper delegation (not query-fixable) |
+| `reprec.assertoutcome()` | 148 | FP | `assertX()` without underscore (#62) |
+| `child.expect()` (pexpect) | 20 | FP | External library assertion method |
+| Other result assertion helpers | 11 | FP | Fixture-based assertion helpers |
+
+### Key Findings
+
+1. **Critical FP**: `reprec.assertoutcome()` is missed because assertion.scm matches `^assert_` (with underscore) but `assertoutcome` has no underscore separator. **Fix: #62 (P0)**.
+2. **fnmatch_lines()** is pytest's primary assertion helper. It raises `AssertionError` on mismatch. This is pure helper delegation — `custom_patterns = ["fnmatch_lines"]` would resolve 415 FPs.
+3. **100% FP rate** makes pytest dogfooding currently unusable. #62 fix would reduce to ~75% FP (remaining = helper delegation).
+
+### WARN Summary
+
+| Rule | Count | % of Tests |
+|------|-------|-----------|
+| T003 (giant-test) | 73 | 3.1% |
+| T101 (how-not-what) | 27 | 1.1% |
+| T006 (low-assertion-density) | 9 | 0.4% |
+| T108 (wait-and-see) | 5 | 0.2% |
+
+## Symfony Dogfooding (2026-03-11)
+
+**17,148 tests, 2,416 files, 759 T001 BLOCK. FP rate: ~24% (182/759).**
+
+### BLOCK Breakdown
+
+| Category | Count | Type | Notes |
+|----------|-------|------|-------|
+| Implicit mock verification | ~400 | TP | PHPUnit mock expectations verified on teardown |
+| `$this->addToAssertionCount()` | 91 | FP | PHPUnit assertion counter (#63) |
+| `$this->markTestSkipped()` only | 91 | FP | Skip-only functions (#64) |
+| Parent test delegation | ~50 | TP | `parent::testSomething()` |
+| Helper method delegation | ~50 | TP | Inherited helper methods |
+| Exception-based testing | ~20 | TP | try/catch only |
+| Other edge cases | ~57 | TP | Setup-only, framework patterns |
+
+### Key Findings
+
+1. **addToAssertionCount()**: PHPUnit's official assertion counter. 91 FPs. **Fix: #63 (P1)**.
+2. **markTestSkipped()-only functions**: 91 FPs. These are intentional non-applicability declarations, not assertion-free tests. **Fix: #64 (P1)**.
+3. **76% TP rate** (577/759) after removing the two FP patterns. Remaining TPs are genuine: mock-only tests, parent delegation, helper delegation.
+4. **Symfony vs Laravel**: Different FP profile. Laravel's main FP was Facade assertions and helper delegation. Symfony's main FP is addToAssertionCount() and markTestSkipped().
+
+### WARN Summary
+
+| Rule | Count | % of Tests |
+|------|-------|-----------|
+| T101 (how-not-what) | 1283 | 7.5% |
+| T003 (giant-test) | 247 | 1.4% |
+| T108 (wait-and-see) | 106 | 0.6% |
+| T006 (low-assertion-density) | 78 | 0.5% |
+| T002 (mock-overuse) | 3 | 0.02% |
+
+### New Issues Filed
+
+| # | Title | Priority |
+|---|-------|----------|
+| #62 | T001 FP: Python `^assert_` → `^assert` broadening | P0 |
+| #63 | T001 FP: PHP addToAssertionCount() as assertion | P1 |
+| #64 | T001: exclude skip-only test functions from evaluation | P1 |
+| #65 | T110: skip-only-test detection (INFO) | P2 |
+
 ## Reproduction
 
 ```bash
@@ -444,4 +545,7 @@ cargo build --release
 ./target/release/exspec --lang rust --format json /tmp/ripgrep
 ./target/release/exspec --lang rust --format json /tmp/tokio
 ./target/release/exspec --lang rust --format json /tmp/clap
+./target/release/exspec --lang python --format json /tmp/django/tests
+./target/release/exspec --lang python --format json /tmp/pytest/testing
+./target/release/exspec --lang php --format json /tmp/symfony
 ```
