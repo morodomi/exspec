@@ -1,6 +1,6 @@
 [package]
 name = "exspec-lang-python"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Python language support for exspec"
 license = "MIT"
