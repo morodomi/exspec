@@ -219,6 +219,67 @@
     property: (property_identifier) @_term_a5
     (#match? @_term_a5 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
 
+;; Chai BDD property-style assertions in return statements (#52).
+;; return_statement, arrow_function body:, and expression_statement are
+;; structurally exclusive, so no double-count risk.
+;; In block-body arrows (=> { return ...; }), tree-sitter wraps the return
+;; in statement_block, not directly in arrow_function body:, preserving exclusivity.
+
+;; Return depth 1: return expect(x).TERMINAL
+(return_statement
+  (member_expression
+    object: (call_expression
+      function: (identifier) @_chai_r1
+      (#match? @_chai_r1 "^expect$"))
+    property: (property_identifier) @_term_r1
+    (#match? @_term_r1 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
+
+;; Return depth 2: return expect(x).chain.TERMINAL
+(return_statement
+  (member_expression
+    object: (member_expression
+      object: (call_expression
+        function: (identifier) @_chai_r2
+        (#match? @_chai_r2 "^expect$")))
+    property: (property_identifier) @_term_r2
+    (#match? @_term_r2 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
+
+;; Return depth 3: return expect(x).a.b.TERMINAL
+(return_statement
+  (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (call_expression
+          function: (identifier) @_chai_r3
+          (#match? @_chai_r3 "^expect$"))))
+    property: (property_identifier) @_term_r3
+    (#match? @_term_r3 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
+
+;; Return depth 4: return expect(x).a.b.c.TERMINAL
+(return_statement
+  (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (call_expression
+            function: (identifier) @_chai_r4
+            (#match? @_chai_r4 "^expect$")))))
+    property: (property_identifier) @_term_r4
+    (#match? @_term_r4 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
+
+;; Return depth 5: return expect(x).a.b.c.d.TERMINAL
+(return_statement
+  (member_expression
+    object: (member_expression
+      object: (member_expression
+        object: (member_expression
+          object: (member_expression
+            object: (call_expression
+              function: (identifier) @_chai_r5
+              (#match? @_chai_r5 "^expect$"))))))
+    property: (property_identifier) @_term_r5
+    (#match? @_term_r5 "^(ok|true|false|null|undefined|exist|exists|empty|NaN|extensible|sealed|frozen|arguments|Arguments|finite|calledOnce|calledTwice|calledThrice|called|notCalled|returned|rejected|fulfilled|throw)$"))) @assertion
+
 ;; Chai BDD method-call chain assertions (with trailing parentheses).
 ;; These patterns are kept separate from the existing Jest/Vitest modifier-chain
 ;; patterns to avoid double-counting while covering common Chai/Sinon-Chai method

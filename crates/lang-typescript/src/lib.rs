@@ -1713,6 +1713,65 @@ describe('d', () => {
         );
     }
 
+    // --- T001 FP fix: Chai property in return statement (#52) ---
+
+    #[test]
+    fn t001_chai_property_return_fixture_detected() {
+        let source = fixture("t001_chai_property_return.test.ts");
+        let extractor = TypeScriptExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_chai_property_return.test.ts");
+        assert_eq!(funcs.len(), 6);
+
+        // TC-01 through TC-05: return-wrapped depths 1-5, each == 1 (no double-count)
+        for (i, f) in funcs.iter().enumerate().take(5) {
+            assert_eq!(
+                f.analysis.assertion_count,
+                1,
+                "TC-{:02} '{}' should have assertion_count == 1, got {}",
+                i + 1,
+                f.name,
+                f.analysis.assertion_count
+            );
+        }
+
+        // TC-06: negative — non-assertion return
+        assert_eq!(
+            funcs[5].analysis.assertion_count, 0,
+            "TC-06 '{}' non-assertion return should have assertion_count == 0, got {}",
+            funcs[5].name, funcs[5].analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn t001_chai_property_existing_wrappers_regression() {
+        let extractor = TypeScriptExtractor::new();
+
+        // expression_statement: "should detect to.be.true (depth 3)" at index 1
+        let expr_source = fixture("t001_chai_property.test.ts");
+        let expr_funcs =
+            extractor.extract_test_functions(&expr_source, "t001_chai_property.test.ts");
+        assert_eq!(expr_funcs[1].name, "should detect to.be.true (depth 3)");
+        assert_eq!(
+            expr_funcs[1].analysis.assertion_count, 1,
+            "expression_statement wrapper regression: expected exactly 1 assertion, got {}",
+            expr_funcs[1].analysis.assertion_count
+        );
+
+        // arrow_function body: "should detect property in forEach arrow" at index 0
+        let arrow_source = fixture("t001_chai_property_arrow.test.ts");
+        let arrow_funcs =
+            extractor.extract_test_functions(&arrow_source, "t001_chai_property_arrow.test.ts");
+        assert_eq!(
+            arrow_funcs[0].name,
+            "should detect property in forEach arrow"
+        );
+        assert_eq!(
+            arrow_funcs[0].analysis.assertion_count, 1,
+            "arrow_function body regression: expected exactly 1 assertion, got {}",
+            arrow_funcs[0].analysis.assertion_count
+        );
+    }
+
     #[test]
     fn t107_skipped_for_typescript() {
         // TypeScript expect() has no message argument, so T107 should never fire.
