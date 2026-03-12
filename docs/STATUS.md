@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in progress (#47-#49). 16 active rules, 4 languages, 596 tests.
+Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in progress (#47-#49). 17 active rules, 4 languages, 681 tests.
 
 ## Progress
 
@@ -55,6 +55,7 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 | T107 | assertion-roulette | INFO | Yes | -- | Yes | Yes |
 | T108 | wait-and-see | WARN | Yes | Yes | Yes | Yes |
 | T109 | undescriptive-test-name | INFO | Yes | Yes | Yes | Yes |
+| T110 | skip-only-test | INFO | Yes | -- | Yes | -- |
 
 \* Notes:
 - Rust T101: token_tree limitation -- private field access in macros not detectable.
@@ -69,7 +70,7 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 596 passing | -- |
+| Tests | 681 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 

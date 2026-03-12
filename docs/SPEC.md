@@ -1028,3 +1028,54 @@ test('positive', () => { expect(add(1,2)).toBeGreaterThan(0); });
 - `toBeNull`, `toBeUndefined`, `toBeDefined`, `toBeTruthy`, `toBeFalsy`, `toBeNaN`
 
 **スコープ外**: PHP/Rust: has_relational_assertion = true 固定 (deferred)
+
+### T110: skip-only-test
+
+Detects test functions that call a skip or incomplete API without making any assertions. This complements T001, which intentionally excludes functions with `has_skip_call == true`.
+
+**Condition**: `has_skip_call == true && assertion_count == 0`
+
+**Default**: INFO
+
+**Supported detection scope**:
+
+- Python: `pytest.skip()`, `self.skipTest()` inside the function body
+- PHP: `$this->markTestSkipped()`, `$this->markTestIncomplete()`
+- TypeScript/Rust: not emitted because `has_skip_call` is always `false`
+
+**Out of scope**:
+
+- Python decorators such as `@pytest.mark.skip` and `@pytest.mark.skipif`
+
+#### Violation
+
+```python
+import pytest
+
+
+def test_skipped_without_assertion():
+    pytest.skip("Not supported yet")
+```
+
+```php
+<?php
+
+class ExampleTest extends TestCase
+{
+    public function testSkippedWithoutAssertion(): void
+    {
+        $this->markTestSkipped('Not supported yet.');
+    }
+}
+```
+
+#### Non-violation
+
+```python
+import pytest
+
+
+def test_skip_after_assert():
+    assert feature_flag_enabled()
+    pytest.skip("follow-up work")
+```

@@ -59,12 +59,12 @@ Each language has specific detection patterns and known gaps. See [docs/language
 
 ## Check Rules
 
-16 rules across 2 tiers. **Tier 1** catches structural issues (assertion-free tests, mock overuse, giant tests). **Tier 2** catches design smells (implementation coupling, fixture sprawl, undescriptive names).
+17 rules across 2 tiers. **Tier 1** catches structural issues (assertion-free tests, mock overuse, giant tests). **Tier 2** catches design smells (implementation coupling, fixture sprawl, undescriptive names).
 
 | Tier | Rules | Levels |
 |------|-------|--------|
 | Tier 1 | T001-T008 | 1 BLOCK, 3 WARN, 4 INFO |
-| Tier 2 | T101-T109 | 3 WARN, 5 INFO |
+| Tier 2 | T101-T110 | 3 WARN, 6 INFO |
 
 See [docs/SPEC.md](docs/SPEC.md) for the full rule reference.
 
@@ -75,7 +75,7 @@ Start with Tier 1 only. Disable Tier 2 until your codebase is clean:
 ```toml
 # .exspec.toml
 [rules]
-disable = ["T101", "T102", "T103", "T105", "T106", "T107", "T108", "T109"]
+disable = ["T101", "T102", "T103", "T105", "T106", "T107", "T108", "T109", "T110"]
 ```
 
 Once Tier 1 passes, enable Tier 2 rules one at a time. Use inline suppression for known exceptions:

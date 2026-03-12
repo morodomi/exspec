@@ -1706,6 +1706,38 @@ mod tests {
     }
 
     #[test]
+    fn t110_skip_only_fixture_produces_info() {
+        use exspec_core::rules::{evaluate_rules, Config, RuleId, Severity};
+
+        let source = fixture("t110_violation.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t110_violation.py");
+        let diags: Vec<_> = evaluate_rules(&funcs, &Config::default())
+            .into_iter()
+            .filter(|d| d.rule == RuleId::new("T110") && d.severity == Severity::Info)
+            .collect();
+        assert_eq!(diags.len(), 1, "Expected exactly one T110 INFO: {diags:?}");
+    }
+
+    #[test]
+    fn t110_existing_skip_only_fixture_produces_two_infos() {
+        use exspec_core::rules::{evaluate_rules, Config, RuleId, Severity};
+
+        let source = fixture("t001_pass_skip_only.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "t001_pass_skip_only.py");
+        let diags: Vec<_> = evaluate_rules(&funcs, &Config::default())
+            .into_iter()
+            .filter(|d| d.rule == RuleId::new("T110") && d.severity == Severity::Info)
+            .collect();
+        assert_eq!(
+            diags.len(),
+            2,
+            "Expected both existing skip-only tests to emit T110 INFO: {diags:?}"
+        );
+    }
+
+    #[test]
     fn query_capture_names_skip_test() {
         let q = make_query(include_str!("../queries/skip_test.scm"));
         assert!(

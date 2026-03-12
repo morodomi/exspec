@@ -77,7 +77,7 @@ pub struct Diagnostic {
 /// Single source of truth — used for config validation and SARIF output.
 pub const KNOWN_RULE_IDS: &[&str] = &[
     "T001", "T002", "T003", "T004", "T005", "T006", "T007", "T008", "T101", "T102", "T103", "T105",
-    "T106", "T107", "T108", "T109",
+    "T106", "T107", "T108", "T109", "T110",
 ];
 
 pub struct Config {
@@ -204,6 +204,25 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: "wait-and-see: test uses sleep/delay (causes flaky tests, consider async/mock alternatives)".to_string(),
+                details: None,
+            });
+        }
+
+        // T110: skip-only-test
+        if !is_disabled(config, "T110")
+            && !is_suppressed(analysis, "T110")
+            && analysis.has_skip_call
+            && analysis.assertion_count == 0
+        {
+            diagnostics.push(Diagnostic {
+                rule: RuleId::new("T110"),
+                severity: effective_severity(config, "T110", Severity::Info),
+                file: func.file.clone(),
+                line: Some(func.line),
+                message: format!(
+                    "skip-only-test: {} contains skip/incomplete without assertions",
+                    func.name
+                ),
                 details: None,
             });
         }
@@ -637,6 +656,115 @@ mod tests {
             t001_diags.is_empty(),
             "T001 should not fire when has_skip_call=true"
         );
+    }
+
+    #[test]
+    fn t110_skip_only_produces_info() {
+        let funcs = vec![make_func(
+            "test_skipped",
+            TestAnalysis {
+                assertion_count: 0,
+                has_skip_call: true,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        let t110: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T110"))
+            .collect();
+        assert_eq!(t110.len(), 1);
+        assert_eq!(t110[0].severity, Severity::Info);
+    }
+
+    #[test]
+    fn t110_skip_with_assertion_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_skipped_after_assert",
+            TestAnalysis {
+                assertion_count: 1,
+                has_skip_call: true,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(!diags.iter().any(|d| d.rule == RuleId::new("T110")));
+    }
+
+    #[test]
+    fn t110_assertion_free_non_skip_keeps_t001_exclusive() {
+        let funcs = vec![make_func(
+            "test_no_assert",
+            TestAnalysis {
+                assertion_count: 0,
+                has_skip_call: false,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(diags.iter().any(|d| d.rule == RuleId::new("T001")));
+        assert!(!diags.iter().any(|d| d.rule == RuleId::new("T110")));
+    }
+
+    #[test]
+    fn t110_disabled_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_skipped",
+            TestAnalysis {
+                assertion_count: 0,
+                has_skip_call: true,
+                ..Default::default()
+            },
+        )];
+        let config = Config {
+            disabled_rules: vec![RuleId::new("T110")],
+            ..Config::default()
+        };
+        let diags = evaluate_rules(&funcs, &config);
+        assert!(!diags.iter().any(|d| d.rule == RuleId::new("T110")));
+    }
+
+    #[test]
+    fn t110_suppressed_no_diagnostic() {
+        let funcs = vec![make_func(
+            "test_skipped",
+            TestAnalysis {
+                assertion_count: 0,
+                has_skip_call: true,
+                suppressed_rules: vec![RuleId::new("T110")],
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &Config::default());
+        assert!(!diags.iter().any(|d| d.rule == RuleId::new("T110")));
+    }
+
+    #[test]
+    fn t110_skip_only_participates_in_t006_density() {
+        let funcs = vec![
+            make_func(
+                "test_skipped",
+                TestAnalysis {
+                    assertion_count: 0,
+                    has_skip_call: true,
+                    ..Default::default()
+                },
+            ),
+            make_func(
+                "test_with_one_assert",
+                TestAnalysis {
+                    assertion_count: 1,
+                    ..Default::default()
+                },
+            ),
+        ];
+        let function_diags = evaluate_rules(&funcs, &Config::default());
+        let file_diags = evaluate_file_rules(
+            &[make_file_analysis("test.py", funcs, false, false, 0)],
+            &Config::default(),
+        );
+        assert!(function_diags.iter().any(|d| d.rule == RuleId::new("T110")));
+        assert!(file_diags.iter().any(|d| d.rule == RuleId::new("T006")));
     }
 
     // --- T002: mock-overuse ---

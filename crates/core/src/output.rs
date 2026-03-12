@@ -249,6 +249,11 @@ const RULE_REGISTRY: &[RuleMeta] = &[
         name: "undescriptive-test-name",
         short_description: "Test name does not describe behavior",
     },
+    RuleMeta {
+        id: "T110",
+        name: "skip-only-test",
+        short_description: "Test skips or marks incomplete without assertions",
+    },
 ];
 
 pub fn format_sarif(diagnostics: &[Diagnostic]) -> String {
@@ -742,6 +747,22 @@ mod tests {
     }
 
     #[test]
+    fn sarif_rules_include_all_registry_entries() {
+        let output = format_sarif(&[]);
+        let parsed = parse_sarif(&output);
+        let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
+            .as_array()
+            .unwrap();
+        for meta in RULE_REGISTRY {
+            assert!(
+                rules.iter().any(|rule| rule["id"] == meta.id),
+                "SARIF rules array should include {} metadata",
+                meta.id
+            );
+        }
+    }
+
+    #[test]
     fn sarif_block_maps_to_error() {
         let output = format_sarif(&[block_diag()]);
         let parsed = parse_sarif(&output);
@@ -788,7 +809,7 @@ mod tests {
         let rules = parsed["runs"][0]["tool"]["driver"]["rules"]
             .as_array()
             .unwrap();
-        assert_eq!(rules.len(), 16);
+        assert_eq!(rules.len(), RULE_REGISTRY.len());
     }
 
     // --- #59: filter_by_severity ---
