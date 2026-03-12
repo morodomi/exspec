@@ -27,3 +27,8 @@ lcov.info
 .claude/agent-memory/
 .claude/settings.local.json
 dogfooding/
+
+# Codex
+AGENTS.md
+.agents/
+scripts/
