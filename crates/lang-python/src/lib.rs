@@ -79,6 +79,15 @@ struct TestMatch {
     decorated_start_row: Option<usize>,
 }
 
+impl TestMatch {
+    fn effective_byte_range(&self) -> (usize, usize) {
+        (
+            self.decorated_start_byte.unwrap_or(self.fn_start_byte),
+            self.decorated_end_byte.unwrap_or(self.fn_end_byte),
+        )
+    }
+}
+
 fn is_in_non_test_class(root: Node, start_byte: usize, end_byte: usize, source: &[u8]) -> bool {
     let Some(node) = root.descendant_for_byte_range(start_byte, end_byte) else {
         return false;
@@ -211,9 +220,29 @@ fn extract_functions_from_tree(source: &str, file_path: &str, root: Node) -> Vec
 
     // Filter out methods in non-test classes (e.g., UserService.test_connection)
     test_matches.retain(|tm| {
-        let check_byte = tm.decorated_start_byte.unwrap_or(tm.fn_start_byte);
-        let check_end = tm.decorated_end_byte.unwrap_or(tm.fn_end_byte);
+        let (check_byte, check_end) = tm.effective_byte_range();
         !is_in_non_test_class(root, check_byte, check_end, source_bytes)
+    });
+
+    // pytest does not discover nested test_* functions, so remove any test
+    // match whose full effective range is strictly contained in another.
+    let effective_ranges: Vec<(usize, usize, usize)> = test_matches
+        .iter()
+        .map(|tm| {
+            let (start, end) = tm.effective_byte_range();
+            (tm.dedup_id, start, end)
+        })
+        .collect();
+    test_matches.retain(|tm| {
+        let (start, end) = tm.effective_byte_range();
+        !effective_ranges
+            .iter()
+            .any(|(other_id, other_start, other_end)| {
+                *other_id != tm.dedup_id
+                    && *other_start <= start
+                    && end <= *other_end
+                    && (*other_start < start || end < *other_end)
+            })
     });
 
     let mut functions = Vec::new();
@@ -1830,6 +1859,108 @@ mod tests {
             t001_diags[0].message.contains("test_uses_fixture"),
             "T001 should reference test_uses_fixture: {}",
             t001_diags[0].message
+        );
+    }
+
+    // --- #41: nested test function false positive ---
+
+    #[test]
+    fn nested_test_function_excluded_from_extraction() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_outer"),
+            "outer test should be included: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_inner"),
+            "nested test should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn parent_assertion_count_correct_with_nested_function() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let outer = funcs
+            .iter()
+            .find(|f| f.name == "test_outer")
+            .expect("test_outer should exist");
+        assert!(
+            outer.analysis.assertion_count >= 1,
+            "parent test should still count its own assertion, got {}",
+            outer.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn multi_level_nested_test_functions_excluded() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_multi_outer"),
+            "outer test should be included: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_multi_mid"),
+            "mid-level nested test should be excluded: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_multi_inner"),
+            "inner nested test should be excluded: {names:?}"
+        );
+    }
+
+    #[test]
+    fn non_test_nested_function_unchanged() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let parent = funcs
+            .iter()
+            .find(|f| f.name == "test_with_helper")
+            .expect("test_with_helper should exist");
+        assert!(
+            parent.analysis.assertion_count >= 1,
+            "non-test helper nesting should not break assertion counting, got {}",
+            parent.analysis.assertion_count
+        );
+    }
+
+    #[test]
+    fn sibling_test_functions_not_affected() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_sibling_a"),
+            "sibling module-level test should remain included: {names:?}"
+        );
+        assert!(
+            names.contains(&"test_sibling_b"),
+            "sibling module-level test should remain included: {names:?}"
+        );
+    }
+
+    #[test]
+    fn async_nested_test_function_excluded() {
+        let source = fixture("nested_test_function.py");
+        let extractor = PythonExtractor::new();
+        let funcs = extractor.extract_test_functions(&source, "nested_test_function.py");
+        let names: Vec<&str> = funcs.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            names.contains(&"test_async_outer"),
+            "outer async container test should be included: {names:?}"
+        );
+        assert!(
+            !names.contains(&"test_async_helper"),
+            "nested async test should be excluded: {names:?}"
         );
     }
 }
