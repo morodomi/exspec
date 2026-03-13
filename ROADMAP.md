@@ -9,30 +9,48 @@
 
 ## Now
 
-Phase 7 (v0.1.2 Release) -- v0.1.2 published 2026-03-12.
+Phase 8a (WARN/INFO FP reduction + remaining BLOCK FP)
+
+Goal: Establish lint reliability as the foundation for all future directions.
 
 | Task | Status |
 |------|--------|
-| Version bump (all crates 0.1.1 -> 0.1.2) | DONE |
-| README version references update | DONE |
-| CHANGELOG v0.1.2 + v0.1.0 historical correction | DONE |
-| Quality gate (test + clippy + fmt + self-dogfooding) | DONE |
-| crates.io publish (core -> lang-* -> cli) | DONE |
-| GitHub Release + tag | DONE |
-| Note.com article | TODO |
+| #62 (P0): Python `^assert_` -> `^assert` (pytest 148 FPs) | TODO |
+| #63 (P1): PHP `addToAssertionCount()` assertion recognition (Symfony 91 FPs) | TODO |
+| #64 (P1): Exclude skip-only tests from T001 (Symfony 91 FPs) | TODO |
+| WARN/INFO FP survey: T101/T102/T109 dogfooding (currently only BLOCK verified) | TODO |
+| Re-dogfooding: pytest, symfony, major projects | TODO |
 
-## Later
+## Next
 
-Phase 8 (Post-Release, feedback-driven)
+Phase 8b (`exspec observe` PoC)
+
+Goal: Validate feasibility of static AST-only test-to-code mapping in 1-2 weeks.
+
+- **Why**: Zero competitors in static approach (all use dynamic instrumentation). Asymmetric risk.
+- **Scope**: 1 language (TypeScript), 1 project (NestJS), route/method test density report
+- **Success**: 70%+ of major routes correctly mapped
+- **Failure**: <50% precision, or AST limitations make practical mapping impossible
+
+Phase 8c (branch on PoC result)
+
+| If observe PoC succeeds | If observe PoC fails |
+|------------------------|---------------------|
+| observe MVP (multi-language) | Go language support |
+| `exspec init` enhancement (framework detection + custom_patterns auto-suggest) | `exspec init` enhancement |
+| GitHub Action + marketplace | GitHub Action |
+| Note.com article "AI-era test observability tool" | Tier 3 rules (T201 spec-quality etc.) |
+
+## Backlog
 
 | Priority | Task | Trigger |
 |----------|------|---------|
-| P1 | FP fixes + threshold tuning | User feedback |
-| P1 | T001 FP: Python nested test functions (#41) | Deferred from Phase 6 |
-| P1 | T001 FP: return-wrapped Chai property (#52) | Deferred from Phase 6 |
+| P2 | T001 FP: Python nested test functions (#41) | Deferred from Phase 6 |
+| P2 | T001 FP: return-wrapped Chai property (#52) | Deferred from Phase 6 |
 | P2 | T201 spec-quality (advisory mode) | "I want semantic quality checks" |
 | P3 | T203 AST similarity duplicate detection | "I want duplicate test detection" |
-| P4 | Test observability (`exspec observe`) | See below |
+| Rejected | LSP/VSCode extension | Too early (low user count) |
+| Rejected | Go language (before FP cleanup) | FP残存状態での横展開はリスク |
 
 ## Non-goals
 
@@ -57,21 +75,21 @@ Phase 8 (Post-Release, feedback-driven)
 | 5C | Tier 2 PHP/Rust expansion (T101-T105, T104 removed) |
 | 5.5 | Gap rules T106-T109 |
 | 6 | Release Hardening: dogfooding 13 projects / 4 langs / ~45k tests, FP fixes (#25-#66), severity review, T110 |
-| 7 (partial) | OSS Release polish: LICENSE, README (#26, #27), crates.io v0.1.1 initial publish |
+| 7 | OSS Release: LICENSE, README (#26, #27), CHANGELOG, crates.io v0.1.2 publish, GitHub Release |
 
 ## Explore: Test Observability (`exspec observe`)
 
-4-AI brainstorm (Grok/Gemini/GPT/Claude, 2026-03-11). Not committed -- exploring feasibility.
+4-AI brainstorm (Grok/Gemini/GPT/Claude, 2026-03-11). Scheduled for Phase 8b PoC.
 
 **Idea**: Route/method-level test density visualization. "What is tested, where are the gaps?" Not a lint (no FAIL), purely descriptive hints.
 
 **OSS gap**: No tool does static test-to-code mapping (all competitors use dynamic instrumentation), automatic test classification (happy/error/validation), or OpenAPI-free route coverage. All three are wide open.
 
-**Open question**: Can AST-only static analysis achieve useful anchor precision? All existing tools (Microsoft TIA, Launchable, SeaLights) chose dynamic instrumentation for a reason. Need prototype experiment on 1 project before committing.
+**PoC plan (Phase 8b)**: TypeScript/supertest on NestJS. 1-2 week timebox. Success = 70%+ route mapping precision.
 
-**Consensus**: Lint FP reduction and crates.io publish come first. Observe is Phase 8+ at earliest. If pursued, start with route view on 1 language (TypeScript/supertest), subcommand architecture (`exspec observe`), never FAIL.
+**Narrative**: "AI-generated code -> exspec lint for quality -> exspec observe for gap discovery" completes the story.
 
-**Alternative worth considering** (Gemini): Instead of observe, deepen lint with Contract/PBT enforcement rules (Tier 3 territory). This leverages exspec's existing moat rather than entering a new domain.
+**Fallback (if PoC fails)**: Deepen lint with Go support, Tier 3 rules, GitHub Action. Observe idea shelved.
 
 ## Key Design Decisions
 
