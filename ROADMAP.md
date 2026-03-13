@@ -34,6 +34,12 @@ Only BLOCK FPs have been classified so far. WARN/INFO counts exist but content i
 
 **Why this matters**: Phase 6 dogfooding collected WARN/INFO hit counts (e.g. T101 at 16% in Laravel, T109 at 13% in NestJS) but never sampled individual hits to determine TP/FP. Without this data, we cannot know whether WARN/INFO rules are useful signals or noise. T107 was demoted WARN->INFO based on exactly this kind of analysis; other rules may need the same treatment.
 
+**Execution strategy**: All 7 rules surveyed in a single pass, not split into sub-phases. Execution order is hit-rate descending (T101 -> T102 -> T003 -> T109 -> T105 -> T106 -> T108).
+
+**Why no sub-phase split**: Survey execution is AI-driven (Claude Code reads exspec JSON output + source files to classify TP/FP), so human cognitive load is not the bottleneck. Sub-phase boundaries (8a-2a/b/c) add management overhead without reducing actual work. Low-frequency rules (T106 at 0.8%, T108 at 0.6%) have so few hits that full-count inspection is cheaper and more accurate than spot-check sampling -- skipping them saves almost nothing while leaving blind spots.
+
+**Execution flexibility**: This is a default order, not a hard gate. If early high-frequency survey results reveal an obvious remediation path (query fix, severity change, threshold change), Phase 8a may temporarily switch to 8a-3 before the tail rules are fully reviewed.
+
 **Method**: Sample 20-30 hits per rule per project, classify as TP/FP.
 
 | Rule | Target projects | Concern |
