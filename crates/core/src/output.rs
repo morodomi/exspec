@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::hints::Hint;
 use crate::metrics::ProjectMetrics;
 use crate::rules::{Diagnostic, Severity};
 
@@ -25,6 +26,7 @@ pub fn format_terminal(
     file_count: usize,
     function_count: usize,
     metrics: &ProjectMetrics,
+    hints: &[Hint],
 ) -> String {
     let mut lines = Vec::new();
 
@@ -106,6 +108,11 @@ pub fn format_terminal(
         "Score: BLOCK {block_count} | WARN {warn_count} | INFO {info_count} | PASS {pass_count}",
     ));
 
+    for hint in hints {
+        lines.push(format!("Hint [{}] {}", hint.rule, hint.title));
+        lines.push(format!("  {}", hint.message));
+    }
+
     lines.join("\n")
 }
 
@@ -115,6 +122,7 @@ pub fn format_json(
     function_count: usize,
     metrics: &ProjectMetrics,
     unfiltered_summary: Option<&SummaryStats>,
+    hints: &[Hint],
 ) -> String {
     let (block_count, warn_count, info_count, pass_count) = if let Some(stats) = unfiltered_summary
     {
@@ -158,6 +166,9 @@ pub fn format_json(
 
     if file_count == 0 {
         output["guidance"] = serde_json::json!("No test files found. Check --lang filter or run from a directory containing test files.");
+    }
+    if !hints.is_empty() {
+        output["hints"] = serde_json::to_value(hints).unwrap_or_default();
     }
     serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
 }
@@ -412,7 +423,7 @@ mod tests {
 
     #[test]
     fn terminal_format_has_summary_header() {
-        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default(), &[]);
         assert!(output.starts_with("exspec v"));
         assert!(output.contains("1 test files"));
         assert!(output.contains("1 test functions"));
@@ -420,19 +431,19 @@ mod tests {
 
     #[test]
     fn terminal_format_has_score_footer() {
-        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default(), &[]);
         assert!(output.contains("Score: BLOCK 1 | WARN 0 | INFO 0 | PASS 0"));
     }
 
     #[test]
     fn terminal_format_block() {
-        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_terminal(&[block_diag()], 1, 1, &ProjectMetrics::default(), &[]);
         assert!(output.contains("BLOCK test.py:10 T001 assertion-free: test has no assertions"));
     }
 
     #[test]
     fn terminal_format_warn() {
-        let output = format_terminal(&[warn_diag()], 1, 1, &ProjectMetrics::default());
+        let output = format_terminal(&[warn_diag()], 1, 1, &ProjectMetrics::default(), &[]);
         assert!(output.contains("WARN test.py:5 T003 giant-test: 73 lines, threshold: 50"));
     }
 
@@ -443,6 +454,7 @@ mod tests {
             2,
             2,
             &ProjectMetrics::default(),
+            &[],
         );
         assert!(output.contains("BLOCK"));
         assert!(output.contains("WARN"));
@@ -450,7 +462,7 @@ mod tests {
 
     #[test]
     fn terminal_format_empty_has_header_and_footer() {
-        let output = format_terminal(&[], 0, 0, &ProjectMetrics::default());
+        let output = format_terminal(&[], 0, 0, &ProjectMetrics::default(), &[]);
         assert!(output.contains("exspec v"));
         assert!(output.contains("Score:"));
     }
@@ -459,7 +471,7 @@ mod tests {
 
     #[test]
     fn json_format_has_version_and_summary() {
-        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None);
+        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["version"].is_string());
         assert!(parsed["summary"].is_object());
@@ -472,7 +484,7 @@ mod tests {
 
     #[test]
     fn json_format_has_diagnostics_and_metrics() {
-        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None);
+        let output = format_json(&[block_diag()], 1, 1, &ProjectMetrics::default(), None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["diagnostics"].is_array());
         assert!(parsed["metrics"].is_object());
@@ -481,7 +493,7 @@ mod tests {
 
     #[test]
     fn json_format_empty() {
-        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None);
+        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["diagnostics"].as_array().unwrap().len(), 0);
         assert_eq!(parsed["summary"]["functions"], 0);
@@ -493,7 +505,7 @@ mod tests {
 
     #[test]
     fn terminal_format_zero_files_shows_guidance() {
-        let output = format_terminal(&[], 0, 0, &ProjectMetrics::default());
+        let output = format_terminal(&[], 0, 0, &ProjectMetrics::default(), &[]);
         assert!(
             output.contains("No test files found"),
             "expected guidance message, got: {output}"
@@ -502,7 +514,7 @@ mod tests {
 
     #[test]
     fn json_format_zero_files_has_guidance() {
-        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None);
+        let output = format_json(&[], 0, 0, &ProjectMetrics::default(), None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["guidance"].is_string());
     }
@@ -527,7 +539,7 @@ mod tests {
             message: "giant-test".to_string(),
             details: None,
         };
-        let output = format_terminal(&[d1, d2], 1, 2, &ProjectMetrics::default());
+        let output = format_terminal(&[d1, d2], 1, 2, &ProjectMetrics::default(), &[]);
         assert!(output.contains("PASS 1"), "expected PASS 1, got: {output}");
     }
 
@@ -541,13 +553,13 @@ mod tests {
             message: "no-parameterized".to_string(),
             details: None,
         };
-        let output = format_terminal(&[d1], 1, 1, &ProjectMetrics::default());
+        let output = format_terminal(&[d1], 1, 1, &ProjectMetrics::default(), &[]);
         assert!(output.contains("PASS 1"), "expected PASS 1, got: {output}");
     }
 
     #[test]
     fn terminal_format_nonzero_files_no_guidance() {
-        let output = format_terminal(&[], 1, 0, &ProjectMetrics::default());
+        let output = format_terminal(&[], 1, 0, &ProjectMetrics::default(), &[]);
         assert!(!output.contains("No test files found"));
     }
 
@@ -584,7 +596,7 @@ mod tests {
             contract_coverage: 0.2,
             ..Default::default()
         };
-        let output = format_terminal(&[block_diag()], 5, 187, &metrics);
+        let output = format_terminal(&[block_diag()], 5, 187, &metrics, &[]);
         let metrics_pos = output.find("Metrics:").expect("Metrics section missing");
         let diag_pos = output.find("BLOCK test.py").expect("diagnostic missing");
         let score_pos = output.find("Score:").expect("Score missing");
@@ -602,7 +614,7 @@ mod tests {
             mock_class_max: 4,
             ..Default::default()
         };
-        let output = format_terminal(&[], 1, 1, &metrics);
+        let output = format_terminal(&[], 1, 1, &metrics, &[]);
         assert!(
             output.contains("2.3/test (avg)"),
             "mock density avg: {output}"
@@ -619,7 +631,7 @@ mod tests {
             parameterized_ratio: 0.15,
             ..Default::default()
         };
-        let output = format_terminal(&[], 5, 20, &metrics);
+        let output = format_terminal(&[], 5, 20, &metrics, &[]);
         assert!(output.contains("15%"), "parameterized pct: {output}");
         assert!(output.contains("3/20"), "parameterized fraction: {output}");
     }
@@ -631,7 +643,7 @@ mod tests {
             contract_coverage: 0.2,
             ..Default::default()
         };
-        let output = format_terminal(&[], 5, 1, &metrics);
+        let output = format_terminal(&[], 5, 1, &metrics, &[]);
         assert!(output.contains("2/5 files"), "pbt files: {output}");
         assert!(output.contains("1/5 files"), "contract files: {output}");
     }
@@ -647,7 +659,7 @@ mod tests {
             contract_coverage: 0.1,
             test_source_ratio: 0.8,
         };
-        let output = format_json(&[], 1, 1, &metrics, None);
+        let output = format_json(&[], 1, 1, &metrics, None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         let m = &parsed["metrics"];
         assert_eq!(m["mock_density_avg"], 1.5);
@@ -666,7 +678,7 @@ mod tests {
             mock_class_max: 3,
             ..Default::default()
         };
-        let output = format_json(&[], 1, 1, &metrics, None);
+        let output = format_json(&[], 1, 1, &metrics, None, &[]);
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["metrics"]["mock_density_avg"].is_number());
         assert!(parsed["metrics"]["mock_class_max"].is_number());
@@ -861,7 +873,7 @@ mod tests {
     #[test]
     fn terminal_format_filtered_shows_filtered_counts() {
         let filtered = vec![block_diag()]; // original had block+warn+info but filtered to block only
-        let output = format_terminal(&filtered, 1, 3, &ProjectMetrics::default());
+        let output = format_terminal(&filtered, 1, 3, &ProjectMetrics::default(), &[]);
         assert!(
             output.contains("BLOCK 1 | WARN 0 | INFO 0"),
             "score should reflect filtered diagnostics: {output}"
@@ -880,7 +892,14 @@ mod tests {
             info_count: 1,
             pass_count: 2,
         };
-        let output = format_json(&filtered, 1, 5, &ProjectMetrics::default(), Some(&stats));
+        let output = format_json(
+            &filtered,
+            1,
+            5,
+            &ProjectMetrics::default(),
+            Some(&stats),
+            &[],
+        );
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(
             parsed["diagnostics"].as_array().unwrap().len(),

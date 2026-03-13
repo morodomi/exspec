@@ -4,6 +4,7 @@ use std::process;
 use clap::Parser;
 use exspec_core::config::ExspecConfig;
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor};
+use exspec_core::hints::compute_hints;
 use exspec_core::metrics::compute_metrics;
 use exspec_core::output::{
     compute_exit_code, filter_by_severity, format_json, format_sarif, format_terminal, SummaryStats,
@@ -315,6 +316,7 @@ fn main() {
     ));
 
     let metrics = compute_metrics(&all_analyses, source_file_count);
+    let hints = compute_hints(&diagnostics, config.custom_assertion_patterns.is_empty());
 
     let display_diagnostics = filter_by_severity(&diagnostics, config.min_severity);
 
@@ -327,6 +329,7 @@ fn main() {
                 all_functions.len(),
                 &metrics,
                 Some(&stats),
+                &hints,
             )
         }
         "sarif" => format_sarif(&display_diagnostics),
@@ -335,6 +338,7 @@ fn main() {
             test_file_count,
             all_functions.len(),
             &metrics,
+            &hints,
         ),
     };
 
@@ -1561,6 +1565,7 @@ mod tests {
             analyses[0].functions.len(),
             &metrics,
             None,
+            &[],
         );
         let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert!(parsed["metrics"].is_object());

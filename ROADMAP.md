@@ -83,7 +83,14 @@ Remaining BLOCK FPs from helper delegation. Not query-fixable but impacts user e
 - B: Built-in framework patterns (recognize major frameworks by default). Better out-of-box experience, but couples exspec to specific frameworks and requires maintenance as frameworks evolve.
 - C: Documentation only (custom_patterns usage guide). Lowest effort, but ~1000 FPs remain for users to configure manually.
 
-Decision after 8a-2/3 results. Implementation may be deferred to Phase 8c.
+**Decision**: User-owned config + runtime guidance. No framework-specific knowledge in exspec core.
+
+**Why**: Helper delegation FPs (~979 across dogfooding projects) are project-specific and cannot be solved by query improvements. The `[assertions] custom_patterns` escape hatch already works. The gap is discoverability, not capability.
+
+**Implementation**:
+1. Runtime hint: when T001 BLOCK >= 10 and custom_patterns is empty, exspec outputs actionable guidance with TOML config example
+2. Hint is designed for AI agent consumption (Claude Code, Codex etc.) -- structured enough for an agent to auto-generate .exspec.toml from the output
+3. `exspec init` with framework detection deferred to Phase 8c
 
 #### Phase 8a exit criteria
 
@@ -106,6 +113,12 @@ Goal: Validate whether static AST-only test-to-code mapping can achieve practica
 - **Scope**: 1 language (TypeScript), 1 project (NestJS), route/method test density report
 - **Success**: 70%+ of major routes correctly mapped
 - **Failure**: <50% precision, or AST limitations make practical mapping impossible
+
+**Adjacent opportunity: helper traversal**. Phase 8a-4 discussion (4-AI consensus) identified that `custom_patterns` helper verification (checking if a registered helper actually contains assertions) is interprocedural analysis -- the same problem observe solves. If observe's call-graph infrastructure works, helper verification comes as a byproduct. Constraints agreed upon:
+- `custom_patterns` contract stays as text fallback (no semantic change)
+- Helper traversal, if implemented, is a separate opt-in setting (e.g. `helper_oracles`)
+- Initial scope: same-file, 1-hop, no recursion, known-assertion-only
+- Cross-file/cross-module traversal deferred until observe proves feasibility
 
 ### Phase 8c: Branch on PoC result
 
