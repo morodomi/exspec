@@ -64,7 +64,7 @@ Each language has specific detection patterns and known gaps. See [docs/language
 | Tier | Rules | Levels |
 |------|-------|--------|
 | Tier 1 | T001-T008 | 1 BLOCK, 3 WARN, 4 INFO |
-| Tier 2 | T101-T110 | 3 WARN, 6 INFO |
+| Tier 2 | T101-T110 | 0 WARN, 8 INFO, 1 OFF |
 
 See [docs/SPEC.md](docs/SPEC.md) for the full rule reference.
 

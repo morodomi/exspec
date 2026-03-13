@@ -56,7 +56,8 @@ Override the default severity for specific rules.
 ```toml
 [rules.severity]
 T107 = "off"     # disable rule entirely (equivalent to adding to disable)
-T101 = "info"    # downgrade from warn to info
+T106 = "info"    # re-enable default-off rule as INFO
+T002 = "block"   # upgrade warn to block
 T001 = "block"   # explicit default (no-op)
 ```
 

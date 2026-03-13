@@ -729,7 +729,7 @@ mod tests {
         );
         let config = load_config(&config_path);
         assert_eq!(config.mock_max, 10);
-        assert_eq!(config.disabled_rules.len(), 2);
+        assert_eq!(config.disabled_rules.len(), 3); // T004, T005 from config + T106 from default
     }
 
     // --- E2E ---

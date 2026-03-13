@@ -753,13 +753,13 @@ Comment must be on the line immediately before `#[test]` attribute.
 
 ### T101: how-not-what
 
-テストが「何を検証しているか (WHAT)」ではなく「どう実装されているか (HOW)」を検証しているパターンを検出する。以下の2種類のパターンを検出しWARNを出力する:
+テストが「何を検証しているか (WHAT)」ではなく「どう実装されているか (HOW)」を検証しているパターンを検出する。以下の2種類のパターンを検出しINFOを出力する:
 
 1. **Mock検証メソッド**: `assert_called_with()`, `toHaveBeenCalledWith()` 等
 2. **Private attribute access in assertions**: assertion内での `obj._private` アクセス (#13)
 
-**Default**: WARN
-**Threshold**: なし (1つ以上でWARN)
+**Default**: INFO
+**Threshold**: なし (1つ以上でINFO)
 
 #### Assertion二重計上 (意図的仕様)
 
@@ -839,7 +839,7 @@ WARN tests/test_api.py:1  T101 how-not-what: 2 implementation-testing pattern(s)
 
 テスト関数が依存するフィクスチャ/セットアップ変数が閾値を超えている。
 
-**Default**: WARN
+**Default**: INFO
 **Threshold**: `fixture_max = 5` (configurable)
 
 #### Python -- Violation

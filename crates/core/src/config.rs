@@ -75,9 +75,14 @@ impl From<ExspecConfig> for Config {
     fn from(ec: ExspecConfig) -> Self {
         let defaults = Config::default();
 
-        let mut disabled_rules: Vec<RuleId> =
-            ec.rules.disable.iter().map(|s| RuleId::new(s)).collect();
+        let mut disabled_rules = defaults.disabled_rules.clone();
         let mut severity_overrides = HashMap::new();
+
+        for rule_id in &ec.rules.disable {
+            if !disabled_rules.iter().any(|r| r.0 == *rule_id) {
+                disabled_rules.push(RuleId::new(rule_id));
+            }
+        }
 
         for (rule_id, severity_str) in &ec.rules.severity {
             if !KNOWN_RULE_IDS.contains(&rule_id.as_str()) {
@@ -92,6 +97,7 @@ impl From<ExspecConfig> for Config {
             } else {
                 match Severity::from_str(severity_str) {
                     Ok(sev) => {
+                        disabled_rules.retain(|r| r.0 != *rule_id);
                         severity_overrides.insert(rule_id.clone(), sev);
                     }
                     Err(_) => {
@@ -150,6 +156,14 @@ impl From<ExspecConfig> for Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn count_disabled(config: &Config, rule_id: &str) -> usize {
+        config
+            .disabled_rules
+            .iter()
+            .filter(|r| r.0 == rule_id)
+            .count()
+    }
 
     fn fixture(name: &str) -> String {
         let path = format!(
@@ -214,9 +228,10 @@ mod tests {
         assert_eq!(config.fixture_max, 10);
         assert_eq!(config.min_assertions_for_t105, 8);
         assert_eq!(config.min_duplicate_count, 4);
-        assert_eq!(config.disabled_rules.len(), 2);
-        assert_eq!(config.disabled_rules[0].0, "T004");
-        assert_eq!(config.disabled_rules[1].0, "T005");
+        assert_eq!(config.disabled_rules.len(), 3);
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T106"));
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T004"));
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T005"));
     }
 
     #[test]
@@ -232,7 +247,8 @@ mod tests {
             config.parameterized_min_ratio,
             defaults.parameterized_min_ratio
         );
-        assert!(config.disabled_rules.is_empty());
+        assert_eq!(config.disabled_rules.len(), defaults.disabled_rules.len());
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T106"));
     }
 
     #[test]
@@ -467,6 +483,29 @@ mod tests {
     }
 
     #[test]
+    fn convert_empty_config_inherits_default_disabled_rules() {
+        let ec = ExspecConfig::default();
+        let config: Config = ec.into();
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T106"));
+    }
+
+    #[test]
+    fn convert_severity_reenables_default_disabled_rule() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T106".to_string(), "info".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert!(!config.disabled_rules.iter().any(|r| r.0 == "T106"));
+        assert_eq!(config.severity_overrides.get("T106"), Some(&Severity::Info));
+    }
+
+    #[test]
     fn convert_severity_invalid_string_skipped() {
         let mut severity = std::collections::HashMap::new();
         severity.insert("T001".to_string(), "blokc".to_string());
@@ -503,15 +542,67 @@ mod tests {
             ..Default::default()
         };
         let config: Config = ec.into();
-        let count = config
-            .disabled_rules
-            .iter()
-            .filter(|r| r.0 == "T107")
-            .count();
-        assert_eq!(
-            count, 1,
-            "T107 should appear exactly once in disabled_rules"
-        );
+        assert_eq!(count_disabled(&config, "T107"), 1);
+    }
+
+    #[test]
+    fn convert_default_disabled_rule_dedup_with_disable() {
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                disable: vec!["T106".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(count_disabled(&config, "T106"), 1);
+    }
+
+    #[test]
+    fn convert_default_disabled_rule_dedup_with_severity_off() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T106".to_string(), "off".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                severity,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(count_disabled(&config, "T106"), 1);
+    }
+
+    #[test]
+    fn convert_disable_then_severity_info_reenables_rule() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T106".to_string(), "info".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                disable: vec!["T106".to_string()],
+                severity,
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert!(!config.disabled_rules.iter().any(|r| r.0 == "T106"));
+        assert_eq!(config.severity_overrides.get("T106"), Some(&Severity::Info));
+    }
+
+    #[test]
+    fn convert_default_disable_then_explicit_off_keeps_single_disabled_entry() {
+        let mut severity = std::collections::HashMap::new();
+        severity.insert("T106".to_string(), "off".to_string());
+        let ec = ExspecConfig {
+            rules: RulesConfig {
+                disable: vec!["T106".to_string()],
+                severity,
+            },
+            ..Default::default()
+        };
+        let config: Config = ec.into();
+        assert_eq!(count_disabled(&config, "T106"), 1);
+        assert!(!config.severity_overrides.contains_key("T106"));
     }
 
     #[test]
@@ -542,6 +633,7 @@ mod tests {
             config.parameterized_min_ratio,
             defaults.parameterized_min_ratio
         );
-        assert!(config.disabled_rules.is_empty());
+        assert_eq!(config.disabled_rules.len(), defaults.disabled_rules.len());
+        assert!(config.disabled_rules.iter().any(|r| r.0 == "T106"));
     }
 }

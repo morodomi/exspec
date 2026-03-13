@@ -47,13 +47,13 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 | T006 | low-assertion-density | WARN | Yes | Yes | Yes | Yes |
 | T007 | test-source-ratio | INFO | -- | -- | -- | -- |
 | T008 | no-contract | INFO | Yes | Yes | Yes | N/A |
-| T101 | how-not-what | WARN | Yes | Yes | Yes | Yes* |
-| T102 | fixture-sprawl | WARN | Yes | Yes | Yes* | Yes* |
+| T101 | how-not-what | INFO | Yes | Yes | Yes | Yes* |
+| T102 | fixture-sprawl | INFO | Yes | Yes | Yes* | Yes* |
 | T103 | missing-error-test | INFO | Yes | Yes | Yes | Yes* |
 | T105 | deterministic-no-metamorphic | INFO | Yes | Yes | Yes | Yes* |
-| T106 | duplicate-literal-assertion | INFO | Yes | Yes | Yes | Yes |
+| T106 | duplicate-literal-assertion | OFF | Yes | Yes | Yes | Yes |
 | T107 | assertion-roulette | INFO | Yes | -- | Yes | Yes |
-| T108 | wait-and-see | WARN | Yes | Yes | Yes | Yes |
+| T108 | wait-and-see | INFO | Yes | Yes | Yes | Yes |
 | T109 | undescriptive-test-name | INFO | Yes | Yes | Yes | Yes |
 | T110 | skip-only-test | INFO | Yes | -- | Yes | -- |
 

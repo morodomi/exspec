@@ -105,7 +105,7 @@ impl Default for Config {
             fixture_max: 5,
             min_assertions_for_t105: 5,
             min_duplicate_count: 3,
-            disabled_rules: Vec::new(),
+            disabled_rules: vec![RuleId::new("T106")], // 93% FP rate (Phase 8a-3)
             custom_assertion_patterns: Vec::new(),
             ignore_patterns: Vec::new(),
             min_severity: Severity::Info,
@@ -185,7 +185,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T102"),
-                severity: effective_severity(config, "T102", Severity::Warn),
+                severity: effective_severity(config, "T102", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -200,7 +200,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         if !is_disabled(config, "T108") && !is_suppressed(analysis, "T108") && analysis.has_wait {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T108"),
-                severity: effective_severity(config, "T108", Severity::Warn),
+                severity: effective_severity(config, "T108", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: "wait-and-see: test uses sleep/delay (causes flaky tests, consider async/mock alternatives)".to_string(),
@@ -289,7 +289,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T101"),
-                severity: effective_severity(config, "T101", Severity::Warn),
+                severity: effective_severity(config, "T101", Severity::Info),
                 file: func.file.clone(),
                 line: Some(func.line),
                 message: format!(
@@ -903,7 +903,7 @@ mod tests {
     // --- T101: how-not-what ---
 
     #[test]
-    fn t101_how_not_what_produces_warn() {
+    fn t101_how_not_what_produces_info() {
         let funcs = vec![make_func(
             "test_calls_repo",
             TestAnalysis {
@@ -915,7 +915,7 @@ mod tests {
         let diags = evaluate_rules(&funcs, &Config::default());
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].rule, RuleId::new("T101"));
-        assert_eq!(diags[0].severity, Severity::Warn);
+        assert_eq!(diags[0].severity, Severity::Info);
         assert!(diags[0]
             .message
             .contains("2 implementation-testing pattern(s)"));
@@ -971,7 +971,7 @@ mod tests {
     // --- T102: fixture-sprawl ---
 
     #[test]
-    fn t102_fixture_count_exceeds_threshold_produces_warn() {
+    fn t102_fixture_count_exceeds_threshold_produces_info() {
         let funcs = vec![make_func(
             "test_sprawl",
             TestAnalysis {
@@ -983,7 +983,7 @@ mod tests {
         let diags = evaluate_rules(&funcs, &Config::default());
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].rule, RuleId::new("T102"));
-        assert_eq!(diags[0].severity, Severity::Warn);
+        assert_eq!(diags[0].severity, Severity::Info);
         assert!(diags[0].message.contains("7 fixtures"));
     }
 
@@ -1589,7 +1589,7 @@ mod tests {
     // --- T108: wait-and-see ---
 
     #[test]
-    fn t108_has_wait_produces_warn() {
+    fn t108_has_wait_produces_info() {
         let funcs = vec![make_func(
             "test_sleepy",
             TestAnalysis {
@@ -1604,7 +1604,7 @@ mod tests {
             .filter(|d| d.rule == RuleId::new("T108"))
             .collect();
         assert_eq!(t108.len(), 1);
-        assert_eq!(t108[0].severity, Severity::Warn);
+        assert_eq!(t108[0].severity, Severity::Info);
         assert!(t108[0].message.contains("wait-and-see"));
     }
 
@@ -1931,7 +1931,7 @@ mod tests {
     // --- T106: duplicate-literal-assertion ---
 
     #[test]
-    fn t106_duplicate_literal_produces_info() {
+    fn t106_default_is_disabled() {
         let funcs = vec![make_func(
             "test_duplicate_literals",
             TestAnalysis {
@@ -1941,6 +1941,31 @@ mod tests {
             },
         )];
         let config = Config::default(); // min_duplicate_count = 3
+        let diags = evaluate_rules(&funcs, &config);
+        let t106: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T106"))
+            .collect();
+        assert!(t106.is_empty());
+    }
+
+    #[test]
+    fn t106_duplicate_literal_can_be_reenabled_via_severity_override() {
+        let funcs = vec![make_func(
+            "test_duplicate_literals",
+            TestAnalysis {
+                assertion_count: 4,
+                duplicate_literal_count: 4,
+                ..Default::default()
+            },
+        )];
+        let mut overrides = HashMap::new();
+        overrides.insert("T106".to_string(), Severity::Info);
+        let config = Config {
+            disabled_rules: Vec::new(),
+            severity_overrides: overrides,
+            ..Default::default()
+        };
         let diags = evaluate_rules(&funcs, &config);
         let t106: Vec<_> = diags
             .iter()
@@ -1980,7 +2005,13 @@ mod tests {
                 ..Default::default()
             },
         )];
-        let config = Config::default(); // min_duplicate_count = 3
+        let mut overrides = HashMap::new();
+        overrides.insert("T106".to_string(), Severity::Info);
+        let config = Config {
+            disabled_rules: Vec::new(),
+            severity_overrides: overrides,
+            ..Default::default()
+        };
         let diags = evaluate_rules(&funcs, &config);
         let t106: Vec<_> = diags
             .iter()
