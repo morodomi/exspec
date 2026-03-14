@@ -1,4 +1,6 @@
-# exspec -- Executable Specification Analyzer
+@AGENTS.md
+
+# exspec (Claude Code Extensions)
 
 ## 制約
 
@@ -8,19 +10,6 @@ Claudeは日本語。開発者は日本語しか理解できない。
 ## Vision
 
 テストは仕様の実行可能な表現である。このツールは、テストが「仕様」として機能しているかを静的解析で高速・言語横断に検証する。
-
-## Read This First
-
-| 何を知りたいか | どこを見るか |
-|---------------|-------------|
-| プロジェクトの方向性と判断理由 | [ROADMAP.md](ROADMAP.md) |
-| 設計思想 | [docs/philosophy.md](docs/philosophy.md) |
-| 既知の制約 | [docs/known-constraints.md](docs/known-constraints.md) |
-| 設定とエスケープハッチ | [docs/configuration.md](docs/configuration.md) |
-| 言語固有の挙動 | [docs/languages/](docs/languages/) |
-| 実プロジェクトでの検証結果 | [docs/dogfooding-results.md](docs/dogfooding-results.md) |
-| ルール仕様 (入力→期待出力) | [docs/SPEC.md](docs/SPEC.md) |
-| ユーザー向け概要 | [README.md](README.md) |
 
 ## Source of Truth
 
@@ -42,131 +31,59 @@ Claudeは日本語。開発者は日本語しか理解できない。
 | 言語固有か？ | [docs/languages/](docs/languages/) |
 | executableに落ちるか？ | コード / テスト / .exspec.toml |
 
-## Tech Stack
-
-- **Language**: Rust
-- **AST解析**: tree-sitter (ネイティブバインディング)
-- **クエリ**: tree-sitter Query (.scm) 外出し -- Rustを再コンパイルせずにロジック調整可能
-- **出力**: JSON / SARIF / Terminal / AI Prompt
-- **配布**: cargo install exspec
-
-## Project Structure
-
-```
-exspec/
-├── Cargo.toml
-├── ROADMAP.md                 中期ロードマップ
-├── crates/
-│   ├── core/                  言語非依存の解析エンジン
-│   │   ├── extractor.rs       テスト関数抽出
-│   │   ├── rules.rs           ルール定義・評価
-│   │   ├── metrics.rs         メトリクス計算
-│   │   ├── output.rs          出力フォーマッタ
-│   │   └── suppress.rs        インラインサプレッション処理
-│   ├── lang-python/           Python固有
-│   │   └── queries/*.scm
-│   ├── lang-typescript/       TypeScript固有
-│   │   └── queries/*.scm
-│   └── cli/                   CLIエントリポイント
-├── tests/
-│   ├── fixtures/              各言語のサンプルテストコード (SPEC駆動)
-│   └── integration/
-├── .exspec.toml               dogfooding用設定
-└── docs/
-```
-
-### queries/*.scm (言語別)
-
-```
-queries/
-  ├── test_function.scm      テスト関数の抽出
-  ├── mock_usage.scm         mock/stub/spy検出
-  ├── assertion.scm          assert文検出
-  ├── parameterized.scm      パラメタライズ検出
-  └── contract.scm           Pydantic/Pandera等検出
-```
-
-## Development Approach: SPEC-Driven
-
-```
-SPEC.md (ルールごとの入力→期待出力)
-  → fixtures/ (違反/準拠サンプル)
-    → tests/ (fixture → 期待出力の検証)
-      → queries/*.scm (tree-sitterクエリ)
-        → crates/ (Rust実装)
-```
-
-## dev-crew Integration
-
-RED Phase Stage 3完了後にquality-gate skillを呼び出し:
-
-```
-RED Phase → テスト作成完了
-  → Quality Gate: quality-gate skill (exspec --format json)
-    ├── exit 0 → Verification Gate → GREEN Phase
-    └── exit 1 → red-workerにフィードバック → 最大2回リトライ
-```
-
-- exspec未インストール時はスキップ（WARNログ）
-- `--strict`は使わない（BLOCKのみexit 1）
-
-## Quick Commands
-
-```bash
-cargo test                                      # テスト実行
-cargo llvm-cov --html --open                    # カバレッジ (HTML)
-cargo llvm-cov --lcov --output-path lcov.info   # カバレッジ (CI用)
-cargo clippy -- -D warnings                     # 静的解析
-cargo fmt --check                               # フォーマットチェック
-cargo fmt                                       # フォーマット適用
-cargo run -- --lang rust .                      # self-dogfooding (BLOCK 0件を確認)
-```
-
-## TDD Workflow
-
-```
-SPEC -> KICKOFF -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
-```
-
-| Phase | Action | Skill |
-|-------|--------|-------|
-| SPEC | 設計・テスト計画 (plan mode) | dev-crew:spec |
-| KICKOFF | Cycle doc作成 | dev-crew:kickoff |
-| RED | テスト作成、失敗確認 | dev-crew:red |
-| GREEN | 最小限の実装 | dev-crew:green |
-| REFACTOR | コード品質改善 | dev-crew:refactor |
-| REVIEW | コードレビュー | dev-crew:review |
-| COMMIT | Git commit | dev-crew:commit |
-
-Cycle docs: `docs/cycles/YYYYMMDD_HHMM_<topic>.md`
-
-## Quality Standards
-
-| Metric | Target |
-|--------|--------|
-| Coverage | 90%+ (min 80%) |
-| Static analysis (clippy) | 0 errors |
-| Format (rustfmt) | 差分なし |
-| exspec (self-dogfooding) | BLOCK 0件 |
-
-### Self-Dogfooding
-
-exspec自身のテストに対して `cargo run -- --lang rust .` を実行し、BLOCKが0件であることを確認する。
-RED phase完了時またはコミット前に必ず実施すること。
-
 ## AI Behavior Principles
+
+### Role: PdM (Product Manager)
+
+計画・調整・確認に徹し、実装は委譲。
+
+### Mandatory: AskUserQuestion
+
+曖昧な要件は全てヒアリング。
+
+### Delegation Strategy
+
+CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 → Agent Teams、それ以外 → 並行Subagent。
+
+### Delegation Rules
+
+- 実装 → green-worker に委譲
+- テスト → red-worker に委譲
+- 設計 → architect に委譲
+- レビュー → reviewer に委譲
+- 曖昧 → AskUserQuestion で確認
+
+### Core Rules
 
 - テストなしの実装禁止。全ての変更はTDDサイクルを通す
 - エラー発見時: 再現テスト作成 -> 修正 -> テスト成功確認
 - 「急いでいる」と言われてもTDDを維持
 - 不確実な情報で推測しない。確認を求める
 
-## Git Conventions
+### CLAUDE.md コンテンツ判定基準
 
-```
-<type>: <subject>
+#### 書くべきもの
 
-feat | fix | docs | refactor | test | chore
-```
+- コードから推測不能なコマンド・規約・ゴッチャ
+- プロジェクト固有のワークフロー
+- 環境セットアップの前提条件
 
-コミット前: `cargo test` + `cargo clippy -- -D warnings` + `cargo fmt --check` + `cargo run -- --lang rust .`
+#### 書くべきでないもの
+
+- 言語の標準規約（リンターで強制できるもの）
+- 一般的なベストプラクティス（platitude: 陳腐な決まり文句）
+- タスク固有の一時的な指示
+
+#### アンチパターン
+
+| パターン | 問題 |
+|---------|------|
+| 詰め込み (overstuffing) | 指示数 ~200 超で全体の遵守率が低下 |
+| リンター代替 (linter substitute) | フォーマットルールは静的解析に任せる |
+| 禁止のみで代替なし (prohibition-only) | 「何をすべきか」を書く |
+
+## Codex Integration
+
+- `codex exec --full-auto`: 非対話実行
+- `codex exec resume --last --full-auto`: セッション継続（cwdフィルタ）
+- `codex review` は使わない

@@ -29,6 +29,5 @@ lcov.info
 dogfooding/
 
 # Codex
-AGENTS.md
 .agents/
 scripts/

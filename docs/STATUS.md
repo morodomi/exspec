@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in progress (#47-#49). 17 active rules, 4 languages, 681 tests.
+Phase 8a (Lint Reliability) in progress. v0.1.2 published to crates.io. 13 projects / 4 languages / ~45k tests dogfooded. 17 active rules, 4 languages, 716 tests.
 
 ## Progress
 
@@ -23,8 +23,10 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 | 5B - Tier 2 rules (T101-T105) Python + TypeScript | DONE |
 | 5C - Tier 2 PHP/Rust expansion (T101-T105) | DONE |
 | 5.5 - Gap rules (T106-T109) + T104 removal | DONE |
-| 6 - Release Hardening (FP fixes, dogfooding) | IN PROGRESS |
-| 7 - OSS release + Note article + MCP Server | NOT STARTED |
+| 6 - Release Hardening (FP fixes, dogfooding) | DONE |
+| 7 - OSS release (crates.io v0.1.2) | DONE |
+| 8a - Lint Reliability (BLOCK/WARN/INFO FP fixes) | IN PROGRESS |
+| 8b - observe PoC (static test-to-code mapping) | NEXT |
 
 ## Supported Languages
 
@@ -70,7 +72,7 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 681 passing | -- |
+| Tests | 716 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
@@ -82,18 +84,3 @@ Phase 6 (Release Hardening) in progress. NestJS dogfooding T001 FP fixes in prog
 | json | Supported |
 | sarif | Supported (v2.1.0) |
 | ai-prompt | Tier 3 (Phase 6) |
-
-## Open Issues
-
-| # | Title | Priority |
-|---|-------|----------|
-| #26 | README Limitations and gradual adoption guide | P2 |
-| #27 | CI integration examples in README | P2 |
-| #29 | Rust should_panic tighten substring match | P3 (Phase 8) |
-| #30 | PHP $this matching style alignment | P3 (Phase 8) |
-| #35 | T001: Chai property in return/assignment context | P2 (Phase 8) |
-| #36 | Custom assertion improvements | P3 (Phase 8) |
-| #41 | T001 FP: Python nested test function assertion counting | P2 |
-| #47 | T001 FP: TS supertest .expect() method-call oracle | P0 (DONE) |
-| #48 | T001 FP: TS Chai/Sinon vocabulary expansion for Jest/NestJS | P0 |
-| #49 | T001 FP: Chai property terminal in .then() callback | P0 |
