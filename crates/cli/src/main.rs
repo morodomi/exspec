@@ -1,11 +1,15 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::process;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use exspec_core::config::ExspecConfig;
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor};
 use exspec_core::hints::compute_hints;
 use exspec_core::metrics::compute_metrics;
+use exspec_core::observe_report::{
+    ObserveFileEntry, ObserveReport, ObserveRouteEntry, ObserveSummary,
+};
 use exspec_core::output::{
     compute_exit_code, filter_by_severity, format_json, format_sarif, format_terminal, SummaryStats,
 };
@@ -20,7 +24,17 @@ use ignore::WalkBuilder;
 
 #[derive(Parser, Debug)]
 #[command(name = "exspec", version, about = "Executable Specification Analyzer")]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Commands>,
+
+    #[command(flatten)]
+    pub lint_args: LintArgs,
+}
+
+#[derive(Args, Debug)]
+pub struct LintArgs {
     /// Path to analyze
     #[arg(default_value = ".")]
     pub path: String,
@@ -44,6 +58,27 @@ pub struct Cli {
     /// Path to config file
     #[arg(long, default_value = ".exspec.toml")]
     pub config: String,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Test-to-code mapping report
+    Observe(ObserveArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct ObserveArgs {
+    /// Path to analyze
+    #[arg(default_value = ".")]
+    pub path: String,
+
+    /// Language (currently: typescript only)
+    #[arg(long)]
+    pub lang: String,
+
+    /// Output format (terminal, json)
+    #[arg(long, default_value = "terminal")]
+    pub format: String,
 }
 
 fn is_python_test_file(path: &str) -> bool {
@@ -119,6 +154,8 @@ enum Language {
 struct DiscoverResult {
     test_files: HashMap<Language, Vec<String>>,
     source_file_count: usize,
+    /// Source (non-test) file paths, collected when available.
+    source_files: Vec<String>,
 }
 
 /// Discover test and source files under `root`.
@@ -129,6 +166,7 @@ struct DiscoverResult {
 fn discover_files(root: &str, lang: Option<&str>, ignore_patterns: &[String]) -> DiscoverResult {
     let mut test_files: HashMap<Language, Vec<String>> = HashMap::new();
     let mut source_count = 0;
+    let mut source_files = Vec::new();
     let root_path = std::path::Path::new(root);
     let walker = WalkBuilder::new(root).hidden(true).git_ignore(true).build();
 
@@ -175,6 +213,7 @@ fn discover_files(root: &str, lang: Option<&str>, ignore_patterns: &[String]) ->
                 || (include_php && is_php_source_file(&path))
                 || (include_rust && is_rust_source_file(&path));
             if is_source {
+                source_files.push(path);
                 source_count += 1;
             }
         }
@@ -183,10 +222,12 @@ fn discover_files(root: &str, lang: Option<&str>, ignore_patterns: &[String]) ->
     for files in test_files.values_mut() {
         files.sort();
     }
+    source_files.sort();
 
     DiscoverResult {
         test_files,
         source_file_count: source_count,
+        source_files,
     }
 }
 
@@ -231,17 +272,157 @@ fn validate_lang(lang: Option<&str>) -> Result<(), String> {
 fn main() {
     let cli = Cli::parse();
 
-    if let Err(e) = validate_lang(cli.lang.as_deref()) {
+    match cli.command {
+        Some(Commands::Observe(args)) => run_observe(args),
+        None => run_lint(cli.lint_args),
+    }
+}
+
+fn run_observe(args: ObserveArgs) {
+    if args.lang != "typescript" {
+        eprintln!("error: observe is only supported for typescript");
+        process::exit(1);
+    }
+
+    let observe_formats = ["terminal", "json"];
+    if !observe_formats.contains(&args.format.as_str()) {
+        eprintln!(
+            "error: unsupported format for observe: {}. Supported: {}",
+            args.format,
+            observe_formats.join(", ")
+        );
+        process::exit(1);
+    }
+
+    let ts_extractor = TypeScriptExtractor::new();
+    let root = &args.path;
+
+    // Load config for ignore_patterns
+    let config = load_config(".exspec.toml");
+
+    // Single filesystem walk: discover test + source files
+    let discovered = discover_files(root, Some("typescript"), &config.ignore_patterns);
+    let test_files: Vec<String> = discovered
+        .test_files
+        .get(&Language::TypeScript)
+        .cloned()
+        .unwrap_or_default();
+    let production_files = &discovered.source_files;
+
+    // Read source files and extract routes
+    let mut all_routes = Vec::new();
+    for prod_file in production_files {
+        let source = match std::fs::read_to_string(prod_file) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let routes = ts_extractor.extract_routes(&source, prod_file);
+        all_routes.extend(routes);
+    }
+
+    // Read test sources into HashMap
+    let mut test_sources: HashMap<String, String> = HashMap::new();
+    for test_file in &test_files {
+        if let Ok(source) = std::fs::read_to_string(test_file) {
+            test_sources.insert(test_file.clone(), source);
+        }
+    }
+
+    // Map test files to production files
+    let file_mappings =
+        ts_extractor.map_test_files_with_imports(production_files, &test_sources, Path::new(root));
+
+    // Single pass: partition into mapped/unmapped + build prod_to_tests lookup
+    let mut prod_to_tests: HashMap<String, Vec<String>> = HashMap::new();
+    let mut file_entries = Vec::new();
+    let mut unmapped = Vec::new();
+    for m in &file_mappings {
+        if m.test_files.is_empty() {
+            unmapped.push(m.production_file.clone());
+        } else {
+            prod_to_tests.insert(m.production_file.clone(), m.test_files.clone());
+            let strategy = match m.strategy {
+                exspec_lang_typescript::observe::MappingStrategy::FileNameConvention => "filename",
+                exspec_lang_typescript::observe::MappingStrategy::ImportTracing => "import",
+            };
+            file_entries.push(ObserveFileEntry {
+                production_file: m.production_file.clone(),
+                test_files: m.test_files.clone(),
+                strategy: strategy.to_string(),
+            });
+        }
+    }
+
+    // Add production files not in file_mappings to unmapped
+    // (file_mappings may not cover all production_files)
+    let mapped_set: std::collections::HashSet<&String> =
+        file_mappings.iter().map(|m| &m.production_file).collect();
+    for pf in production_files {
+        if !mapped_set.contains(pf) {
+            unmapped.push(pf.clone());
+        }
+    }
+
+    // Build route entries with coverage info
+    let route_entries: Vec<ObserveRouteEntry> = all_routes
+        .iter()
+        .map(|route| {
+            let test_files = prod_to_tests.get(&route.file).cloned().unwrap_or_default();
+            ObserveRouteEntry {
+                http_method: route.http_method.clone(),
+                path: route.path.clone(),
+                handler: format!("{}.{}", route.class_name, route.handler_name),
+                file: route.file.clone(),
+                test_files,
+            }
+        })
+        .collect();
+
+    let routes_covered = route_entries
+        .iter()
+        .filter(|r| !r.test_files.is_empty())
+        .count();
+
+    let mapped_count = file_entries.len();
+
+    let report = ObserveReport {
+        summary: ObserveSummary {
+            production_files: production_files.len(),
+            test_files: test_files.len(),
+            mapped_files: mapped_count,
+            unmapped_files: unmapped.len(),
+            routes_total: route_entries.len(),
+            routes_covered,
+        },
+        file_mappings: file_entries,
+        routes: route_entries,
+        unmapped_production_files: unmapped,
+    };
+
+    let output = match args.format.as_str() {
+        "json" => report.format_json(),
+        _ => report.format_terminal(),
+    };
+
+    if !output.is_empty() {
+        println!("{output}");
+    }
+
+    process::exit(0);
+}
+
+fn run_lint(lint: LintArgs) {
+    if let Err(e) = validate_lang(lint.lang.as_deref()) {
         eprintln!("error: {e}");
         process::exit(1);
     }
 
-    if let Err(e) = validate_format(&cli.format) {
+    if let Err(e) = validate_format(&lint.format) {
         eprintln!("error: {e}");
         process::exit(1);
     }
 
-    let cli_min_severity = if let Some(ref s) = cli.min_severity {
+    let cli_min_severity = if let Some(ref s) = lint.min_severity {
         match s.parse::<Severity>() {
             Ok(sev) => Some(sev),
             Err(e) => {
@@ -253,7 +434,7 @@ fn main() {
         None
     };
 
-    let mut config = load_config(&cli.config);
+    let mut config = load_config(&lint.config);
     if let Some(sev) = cli_min_severity {
         config.min_severity = sev;
     }
@@ -262,7 +443,7 @@ fn main() {
     let php_extractor = PhpExtractor::new();
     let rust_extractor = RustExtractor::new();
 
-    let discovered = discover_files(&cli.path, cli.lang.as_deref(), &config.ignore_patterns);
+    let discovered = discover_files(&lint.path, lint.lang.as_deref(), &config.ignore_patterns);
     let test_file_count: usize = discovered.test_files.values().map(|v| v.len()).sum();
     let mut all_analyses: Vec<FileAnalysis> = Vec::new();
 
@@ -320,7 +501,7 @@ fn main() {
 
     let display_diagnostics = filter_by_severity(&diagnostics, config.min_severity);
 
-    let output = match cli.format.as_str() {
+    let output = match lint.format.as_str() {
         "json" => {
             let stats = SummaryStats::from_diagnostics(&diagnostics, all_functions.len());
             format_json(
@@ -347,7 +528,7 @@ fn main() {
     }
 
     // Exit code uses UNFILTERED diagnostics
-    let exit_code = compute_exit_code(&diagnostics, cli.strict);
+    let exit_code = compute_exit_code(&diagnostics, lint.strict);
     process::exit(exit_code);
 }
 
@@ -355,35 +536,42 @@ fn main() {
 mod tests {
     use super::*;
 
+    /// Parse CLI args and extract LintArgs (for backward-compat tests).
+    fn parse_lint(args: &[&str]) -> LintArgs {
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(cli.command.is_none(), "expected lint mode (no subcommand)");
+        cli.lint_args
+    }
+
     #[test]
     fn cli_parses_path_argument() {
-        let cli = Cli::try_parse_from(["exspec", "."]).unwrap();
-        assert_eq!(cli.path, ".");
+        let lint = parse_lint(&["exspec", "."]);
+        assert_eq!(lint.path, ".");
     }
 
     #[test]
     fn cli_default_path() {
-        let cli = Cli::try_parse_from(["exspec"]).unwrap();
-        assert_eq!(cli.path, ".");
+        let lint = parse_lint(&["exspec"]);
+        assert_eq!(lint.path, ".");
     }
 
     #[test]
     fn cli_strict_flag() {
-        let cli = Cli::try_parse_from(["exspec", "--strict", "src/"]).unwrap();
-        assert!(cli.strict);
-        assert_eq!(cli.path, "src/");
+        let lint = parse_lint(&["exspec", "--strict", "src/"]);
+        assert!(lint.strict);
+        assert_eq!(lint.path, "src/");
     }
 
     #[test]
     fn cli_format_option() {
-        let cli = Cli::try_parse_from(["exspec", "--format", "json", "."]).unwrap();
-        assert_eq!(cli.format, "json");
+        let lint = parse_lint(&["exspec", "--format", "json", "."]);
+        assert_eq!(lint.format, "json");
     }
 
     #[test]
     fn cli_lang_option() {
-        let cli = Cli::try_parse_from(["exspec", "--lang", "python", "."]).unwrap();
-        assert_eq!(cli.lang, Some("python".to_string()));
+        let lint = parse_lint(&["exspec", "--lang", "python", "."]);
+        assert_eq!(lint.lang, Some("python".to_string()));
     }
 
     #[test]
@@ -394,28 +582,89 @@ mod tests {
 
     #[test]
     fn cli_config_option() {
-        let cli = Cli::try_parse_from(["exspec", "--config", "my.toml", "."]).unwrap();
-        assert_eq!(cli.config, "my.toml");
+        let lint = parse_lint(&["exspec", "--config", "my.toml", "."]);
+        assert_eq!(lint.config, "my.toml");
     }
 
     #[test]
     fn cli_config_default() {
-        let cli = Cli::try_parse_from(["exspec"]).unwrap();
-        assert_eq!(cli.config, ".exspec.toml");
+        let lint = parse_lint(&["exspec"]);
+        assert_eq!(lint.config, ".exspec.toml");
     }
 
     // --- #59: --min-severity CLI ---
 
     #[test]
     fn cli_min_severity_option() {
-        let cli = Cli::try_parse_from(["exspec", "--min-severity", "warn", "."]).unwrap();
-        assert_eq!(cli.min_severity, Some("warn".to_string()));
+        let lint = parse_lint(&["exspec", "--min-severity", "warn", "."]);
+        assert_eq!(lint.min_severity, Some("warn".to_string()));
     }
 
     #[test]
     fn cli_min_severity_default_none() {
-        let cli = Cli::try_parse_from(["exspec"]).unwrap();
-        assert_eq!(cli.min_severity, None);
+        let lint = parse_lint(&["exspec"]);
+        assert_eq!(lint.min_severity, None);
+    }
+
+    // --- OB1: observe unsupported lang ---
+
+    #[test]
+    fn ob1_observe_unsupported_lang() {
+        // "python" is not supported for observe
+        let cli = Cli::try_parse_from(["exspec", "observe", "--lang", "python", "."]).unwrap();
+        match cli.command {
+            Some(Commands::Observe(args)) => {
+                assert_eq!(args.lang, "python");
+                // Validation happens at runtime, just verify parse works
+            }
+            _ => panic!("expected Observe subcommand"),
+        }
+    }
+
+    // --- OB8: lint backward compatibility ---
+
+    #[test]
+    fn ob8_lint_backward_compat() {
+        // `exspec . --lang rust` should parse as lint (no subcommand)
+        let cli = Cli::try_parse_from(["exspec", "--lang", "rust", "."]).unwrap();
+        assert!(cli.command.is_none());
+        assert_eq!(cli.lint_args.lang, Some("rust".to_string()));
+        assert_eq!(cli.lint_args.path, ".");
+    }
+
+    // --- observe CLI parsing ---
+
+    #[test]
+    fn observe_subcommand_parses() {
+        let cli = Cli::try_parse_from(["exspec", "observe", "--lang", "typescript", "."]).unwrap();
+        match cli.command {
+            Some(Commands::Observe(args)) => {
+                assert_eq!(args.lang, "typescript");
+                assert_eq!(args.path, ".");
+                assert_eq!(args.format, "terminal");
+            }
+            _ => panic!("expected Observe subcommand"),
+        }
+    }
+
+    #[test]
+    fn observe_subcommand_json_format() {
+        let cli = Cli::try_parse_from([
+            "exspec",
+            "observe",
+            "--lang",
+            "typescript",
+            "--format",
+            "json",
+            ".",
+        ])
+        .unwrap();
+        match cli.command {
+            Some(Commands::Observe(args)) => {
+                assert_eq!(args.format, "json");
+            }
+            _ => panic!("expected Observe subcommand"),
+        }
     }
 
     // --- Python file discovery ---
