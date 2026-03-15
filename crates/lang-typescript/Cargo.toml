@@ -12,3 +12,6 @@ exspec-core = { path = "../core", version = "0.1.2" }
 tree-sitter = "0.24"
 tree-sitter-typescript = "0.23"
 streaming-iterator = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

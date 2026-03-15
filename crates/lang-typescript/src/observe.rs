@@ -10,6 +10,9 @@ use super::{cached_query, TypeScriptExtractor};
 const PRODUCTION_FUNCTION_QUERY: &str = include_str!("../queries/production_function.scm");
 static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
+const IMPORT_MAPPING_QUERY: &str = include_str!("../queries/import_mapping.scm");
+static IMPORT_MAPPING_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+
 /// A production (non-test) function or method extracted from source code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProductionFunction {
@@ -52,6 +55,16 @@ pub struct FileMapping {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MappingStrategy {
     FileNameConvention,
+    ImportTracing,
+}
+
+/// An import statement extracted from a TypeScript source file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImportMapping {
+    pub symbol_name: String,
+    pub module_specifier: String,
+    pub file: String,
+    pub line: usize,
 }
 
 /// HTTP method decorators recognized as route indicators.
@@ -598,6 +611,165 @@ fn find_class_info(method_node: Node, source: &[u8]) -> (Option<String>, bool) {
         current = node.parent();
     }
     (None, false)
+}
+
+/// Extract import statements from TypeScript source.
+/// Returns only relative imports (starting with "." or ".."); npm packages are excluded.
+impl TypeScriptExtractor {
+    pub fn extract_imports(&self, source: &str, file_path: &str) -> Vec<ImportMapping> {
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+        let query = cached_query(&IMPORT_MAPPING_QUERY_CACHE, IMPORT_MAPPING_QUERY);
+        let symbol_idx = query.capture_index_for_name("symbol_name").unwrap();
+        let specifier_idx = query.capture_index_for_name("module_specifier").unwrap();
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+        let mut result = Vec::new();
+
+        while let Some(m) = matches.next() {
+            let mut symbol = None;
+            let mut specifier = None;
+            let mut symbol_line = 0usize;
+            for cap in m.captures {
+                if cap.index == symbol_idx {
+                    symbol = Some(cap.node.utf8_text(source_bytes).unwrap_or(""));
+                    symbol_line = cap.node.start_position().row + 1;
+                } else if cap.index == specifier_idx {
+                    specifier = Some(cap.node.utf8_text(source_bytes).unwrap_or(""));
+                }
+            }
+            if let (Some(sym), Some(spec)) = (symbol, specifier) {
+                // Filter: only relative paths (./ or ../)
+                if spec.starts_with("./") || spec.starts_with("../") {
+                    result.push(ImportMapping {
+                        symbol_name: sym.to_string(),
+                        module_specifier: spec.to_string(),
+                        file: file_path.to_string(),
+                        line: symbol_line,
+                    });
+                }
+            }
+        }
+        result
+    }
+
+    pub fn map_test_files_with_imports(
+        &self,
+        production_files: &[String],
+        test_sources: &HashMap<String, String>,
+        scan_root: &Path,
+    ) -> Vec<FileMapping> {
+        let test_file_list: Vec<String> = test_sources.keys().cloned().collect();
+
+        // Layer 1: filename convention
+        let mut mappings = self.map_test_files(production_files, &test_file_list);
+
+        // Build canonical path -> production index lookup
+        let canonical_root = match scan_root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return mappings,
+        };
+        let mut canonical_to_idx: HashMap<String, usize> = HashMap::new();
+        for (idx, prod) in production_files.iter().enumerate() {
+            if let Ok(canonical) = Path::new(prod).canonicalize() {
+                canonical_to_idx.insert(canonical.to_string_lossy().into_owned(), idx);
+            }
+        }
+
+        // Collect Layer 1 matched test files
+        let layer1_matched: std::collections::HashSet<String> = mappings
+            .iter()
+            .flat_map(|m| m.test_files.iter().cloned())
+            .collect();
+
+        // Layer 2: import tracing for unmatched test files only
+        for (test_file, source) in test_sources {
+            if layer1_matched.contains(test_file) {
+                continue;
+            }
+            let imports = self.extract_imports(source, test_file);
+            let from_file = Path::new(test_file);
+            let mut matched_indices = std::collections::HashSet::new();
+            for import in &imports {
+                if let Some(resolved) =
+                    resolve_import_path(&import.module_specifier, from_file, &canonical_root)
+                {
+                    if let Some(&idx) = canonical_to_idx.get(&resolved) {
+                        matched_indices.insert(idx);
+                    }
+                }
+            }
+            for idx in matched_indices {
+                mappings[idx].test_files.push(test_file.clone());
+            }
+        }
+
+        // Update strategy: if a production file had no Layer 1 matches but has Layer 2 matches,
+        // set strategy to ImportTracing
+        for mapping in &mut mappings {
+            let has_layer1 = mapping
+                .test_files
+                .iter()
+                .any(|t| layer1_matched.contains(t));
+            if !has_layer1 && !mapping.test_files.is_empty() {
+                mapping.strategy = MappingStrategy::ImportTracing;
+            }
+        }
+
+        mappings
+    }
+}
+
+/// Resolve a module specifier to an absolute file path.
+/// Returns None if the file does not exist or is outside scan_root.
+pub fn resolve_import_path(
+    module_specifier: &str,
+    from_file: &Path,
+    scan_root: &Path,
+) -> Option<String> {
+    // Canonicalize base_dir: use the parent directory of from_file.
+    // If the parent directory exists (even if from_file itself doesn't), canonicalize it.
+    // Otherwise fall back to the non-canonical parent for path arithmetic.
+    let base_dir_raw = from_file.parent()?;
+    let base_dir = base_dir_raw
+        .canonicalize()
+        .unwrap_or_else(|_| base_dir_raw.to_path_buf());
+    let raw_path = base_dir.join(module_specifier);
+    // If the specifier already has a known TS/JS extension, try it directly.
+    // Otherwise, probe by appending each known extension. We must APPEND (not replace) because
+    // dotted module names like "user.service" have "service" as their apparent extension but
+    // are not actually extension-bearing: the real file is "user.service.ts".
+    const TS_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
+    let has_known_ext = raw_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| TS_EXTENSIONS.contains(&e));
+    let candidates = if has_known_ext {
+        vec![raw_path.clone()]
+    } else {
+        // Append extension to preserve dotted names (e.g. user.service → user.service.ts)
+        let base = raw_path.as_os_str().to_string_lossy();
+        TS_EXTENSIONS
+            .iter()
+            .map(|ext| std::path::PathBuf::from(format!("{base}.{ext}")))
+            .collect::<Vec<_>>()
+    };
+
+    let canonical_root = scan_root.canonicalize().ok()?;
+
+    for candidate in candidates {
+        if let Ok(canonical) = candidate.canonicalize() {
+            if canonical.starts_with(&canonical_root) {
+                return Some(canonical.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
 }
 
 fn production_stem(path: &str) -> Option<&str> {
@@ -1316,5 +1488,467 @@ mod tests {
         assert_eq!(test_stem("src/utils.test.ts"), Some("utils"));
         assert_eq!(test_stem("src/App.test.tsx"), Some("App"));
         assert_eq!(test_stem("src/invalid.ts"), None);
+    }
+
+    // === extract_imports Tests (IM1-IM7) ===
+
+    // IM1: named import の symbol と specifier が抽出される
+    #[test]
+    fn im1_named_import_symbol_and_specifier() {
+        // Given: import_named.ts with `import { UsersController } from './users.controller'`
+        let source = fixture("import_named.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_named.ts");
+
+        // Then: symbol: "UsersController", specifier: "./users.controller"
+        let found = imports.iter().find(|i| i.symbol_name == "UsersController");
+        assert!(
+            found.is_some(),
+            "expected UsersController in imports: {imports:?}"
+        );
+        assert_eq!(
+            found.unwrap().module_specifier,
+            "./users.controller",
+            "wrong specifier"
+        );
+    }
+
+    // IM2: 複数 named import (`{ A, B }`) が 2件返る (同specifier、異なるsymbol)
+    #[test]
+    fn im2_multiple_named_imports() {
+        // Given: import_mixed.ts with `import { A, B } from './module'`
+        let source = fixture("import_mixed.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_mixed.ts");
+
+        // Then: A と B が両方返る (同じ ./module specifier)
+        let from_module: Vec<&ImportMapping> = imports
+            .iter()
+            .filter(|i| i.module_specifier == "./module")
+            .collect();
+        let symbols: Vec<&str> = from_module.iter().map(|i| i.symbol_name.as_str()).collect();
+        assert!(symbols.contains(&"A"), "expected A in symbols: {symbols:?}");
+        assert!(symbols.contains(&"B"), "expected B in symbols: {symbols:?}");
+        // at least 2 from ./module (IM2: { A, B } + IM3: { A as B } both in import_mixed.ts)
+        assert!(
+            from_module.len() >= 2,
+            "expected at least 2 imports from ./module, got {from_module:?}"
+        );
+    }
+
+    // IM3: エイリアス import (`{ A as B }`) で元の名前 "A" が返る
+    #[test]
+    fn im3_alias_import_original_name() {
+        // Given: import_mixed.ts with `import { A as B } from './module'`
+        let source = fixture("import_mixed.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_mixed.ts");
+
+        // Then: symbol_name は "A" (エイリアス "B" ではなく元の名前)
+        // import_mixed.ts has: { A, B } and { A as B } — both should yield A
+        let a_count = imports.iter().filter(|i| i.symbol_name == "A").count();
+        assert!(
+            a_count >= 1,
+            "expected at least one import with symbol_name 'A', got: {imports:?}"
+        );
+    }
+
+    // IM4: default import の symbol と specifier が抽出される
+    #[test]
+    fn im4_default_import() {
+        // Given: import_default.ts with `import UsersController from './users.controller'`
+        let source = fixture("import_default.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_default.ts");
+
+        // Then: symbol: "UsersController", specifier: "./users.controller"
+        assert_eq!(imports.len(), 1, "expected 1 import, got {imports:?}");
+        assert_eq!(imports[0].symbol_name, "UsersController");
+        assert_eq!(imports[0].module_specifier, "./users.controller");
+    }
+
+    // IM5: npm パッケージ import (`@nestjs/testing`) が除外される (空Vec)
+    #[test]
+    fn im5_npm_package_excluded() {
+        // Given: source with only `import { Test } from '@nestjs/testing'`
+        let source = "import { Test } from '@nestjs/testing';";
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(source, "test.ts");
+
+        // Then: 空Vec (npm パッケージは除外)
+        assert!(imports.is_empty(), "expected empty vec, got {imports:?}");
+    }
+
+    // IM6: 相対 `../` パスが含まれる
+    #[test]
+    fn im6_relative_parent_path() {
+        // Given: import_named.ts with `import { S } from '../services/s.service'`
+        let source = fixture("import_named.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_named.ts");
+
+        // Then: specifier: "../services/s.service"
+        let found = imports
+            .iter()
+            .find(|i| i.module_specifier == "../services/s.service");
+        assert!(
+            found.is_some(),
+            "expected ../services/s.service in imports: {imports:?}"
+        );
+        assert_eq!(found.unwrap().symbol_name, "S");
+    }
+
+    // IM7: 空ソースで空Vec が返る
+    #[test]
+    fn im7_empty_source_returns_empty() {
+        // Given: empty source
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports("", "empty.ts");
+
+        // Then: 空Vec
+        assert!(imports.is_empty());
+    }
+
+    // === resolve_import_path Tests (RP1-RP5) ===
+
+    // RP1: 拡張子なし specifier + 実在 `.ts` ファイル → Some(canonical path)
+    #[test]
+    fn rp1_resolve_ts_without_extension() {
+        use std::io::Write as IoWrite;
+        use tempfile::TempDir;
+
+        // Given: scan_root/src/users.controller.ts が実在する
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let target = src_dir.join("users.controller.ts");
+        std::fs::File::create(&target).unwrap();
+
+        let from_file = src_dir.join("users.controller.spec.ts");
+
+        // When: resolve_import_path("./users.controller", ...)
+        let result = resolve_import_path("./users.controller", &from_file, dir.path());
+
+        // Then: Some(canonical path)
+        assert!(
+            result.is_some(),
+            "expected Some for existing .ts file, got None"
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.ends_with("users.controller.ts"),
+            "expected path ending with users.controller.ts, got {resolved}"
+        );
+    }
+
+    // RP2: 拡張子付き specifier (`.ts`) + 実在ファイル → Some(canonical path)
+    #[test]
+    fn rp2_resolve_ts_with_extension() {
+        use tempfile::TempDir;
+
+        // Given: scan_root/src/users.controller.ts が実在する
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let target = src_dir.join("users.controller.ts");
+        std::fs::File::create(&target).unwrap();
+
+        let from_file = src_dir.join("users.controller.spec.ts");
+
+        // When: resolve_import_path("./users.controller.ts", ...) (拡張子付き)
+        let result = resolve_import_path("./users.controller.ts", &from_file, dir.path());
+
+        // Then: Some(canonical path)
+        assert!(
+            result.is_some(),
+            "expected Some for existing file with explicit .ts extension"
+        );
+    }
+
+    // RP3: 存在しないファイル → None
+    #[test]
+    fn rp3_nonexistent_file_returns_none() {
+        use tempfile::TempDir;
+
+        // Given: scan_root が空
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let from_file = src_dir.join("some.spec.ts");
+
+        // When: resolve_import_path("./nonexistent", ...)
+        let result = resolve_import_path("./nonexistent", &from_file, dir.path());
+
+        // Then: None
+        assert!(result.is_none(), "expected None for nonexistent file");
+    }
+
+    // RP4: scan_root 外のパス (`../../outside`) → None
+    #[test]
+    fn rp4_outside_scan_root_returns_none() {
+        use tempfile::TempDir;
+
+        // Given: scan_root/src/ から ../../outside を参照 (scan_root 外)
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let from_file = src_dir.join("some.spec.ts");
+
+        // When: resolve_import_path("../../outside", ...)
+        let result = resolve_import_path("../../outside", &from_file, dir.path());
+
+        // Then: None (path traversal ガード)
+        assert!(result.is_none(), "expected None for path outside scan_root");
+    }
+
+    // RP5: 拡張子なし specifier + 実在 `.tsx` ファイル → Some(canonical path)
+    #[test]
+    fn rp5_resolve_tsx_without_extension() {
+        use tempfile::TempDir;
+
+        // Given: scan_root/src/App.tsx が実在する
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let target = src_dir.join("App.tsx");
+        std::fs::File::create(&target).unwrap();
+
+        let from_file = src_dir.join("App.test.tsx");
+
+        // When: resolve_import_path("./App", ...)
+        let result = resolve_import_path("./App", &from_file, dir.path());
+
+        // Then: Some(canonical path ending in App.tsx)
+        assert!(
+            result.is_some(),
+            "expected Some for existing .tsx file, got None"
+        );
+        let resolved = result.unwrap();
+        assert!(
+            resolved.ends_with("App.tsx"),
+            "expected path ending with App.tsx, got {resolved}"
+        );
+    }
+
+    // === map_test_files_with_imports Tests (MT1-MT4) ===
+
+    // MT1: Layer 1 マッチ + Layer 2 マッチが共存 → 両方マッピングされる
+    #[test]
+    fn mt1_layer1_and_layer2_both_matched() {
+        use tempfile::TempDir;
+
+        // Given:
+        //   production: src/users.controller.ts
+        //   test (Layer 1 match): src/users.controller.spec.ts (same dir)
+        //   test (Layer 2 match): test/users.controller.spec.ts (imports users.controller)
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        let test_dir = dir.path().join("test");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_path = src_dir.join("users.controller.ts");
+        std::fs::File::create(&prod_path).unwrap();
+
+        let layer1_test = src_dir.join("users.controller.spec.ts");
+        let layer1_source = r#"// Layer 1 spec
+describe('UsersController', () => {});
+"#;
+
+        let layer2_test = test_dir.join("users.controller.spec.ts");
+        let layer2_source = format!(
+            "import {{ UsersController }} from '../src/users.controller';\ndescribe('cross', () => {{}});\n"
+        );
+
+        let production_files = vec![prod_path.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            layer1_test.to_string_lossy().into_owned(),
+            layer1_source.to_string(),
+        );
+        test_sources.insert(
+            layer2_test.to_string_lossy().into_owned(),
+            layer2_source.to_string(),
+        );
+
+        let extractor = TypeScriptExtractor::new();
+
+        // When: map_test_files_with_imports
+        let mappings =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: 両方のテストがマッピングされる
+        assert_eq!(mappings.len(), 1, "expected 1 FileMapping");
+        let mapping = &mappings[0];
+        assert!(
+            mapping
+                .test_files
+                .contains(&layer1_test.to_string_lossy().into_owned()),
+            "expected Layer 1 test in mapping, got {:?}",
+            mapping.test_files
+        );
+        assert!(
+            mapping
+                .test_files
+                .contains(&layer2_test.to_string_lossy().into_owned()),
+            "expected Layer 2 test in mapping, got {:?}",
+            mapping.test_files
+        );
+    }
+
+    // MT2: クロスディレクトリ import → ImportTracing でマッチ
+    #[test]
+    fn mt2_cross_directory_import_tracing() {
+        use tempfile::TempDir;
+
+        // Given:
+        //   production: src/services/user.service.ts
+        //   test: test/user.service.spec.ts (imports user.service from cross-directory)
+        //   Layer 1 は別ディレクトリのためマッチしない
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src").join("services");
+        let test_dir = dir.path().join("test");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_path = src_dir.join("user.service.ts");
+        std::fs::File::create(&prod_path).unwrap();
+
+        let test_path = test_dir.join("user.service.spec.ts");
+        let test_source = format!(
+            "import {{ UserService }} from '../src/services/user.service';\ndescribe('cross', () => {{}});\n"
+        );
+
+        let production_files = vec![prod_path.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(test_path.to_string_lossy().into_owned(), test_source);
+
+        let extractor = TypeScriptExtractor::new();
+
+        // When: map_test_files_with_imports
+        let mappings =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: ImportTracing でマッチ
+        assert_eq!(mappings.len(), 1);
+        let mapping = &mappings[0];
+        assert!(
+            mapping
+                .test_files
+                .contains(&test_path.to_string_lossy().into_owned()),
+            "expected test in mapping via ImportTracing, got {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "expected ImportTracing strategy"
+        );
+    }
+
+    // MT3: npm import のみ → 未マッチ
+    #[test]
+    fn mt3_npm_only_import_not_matched() {
+        use tempfile::TempDir;
+
+        // Given:
+        //   production: src/users.controller.ts
+        //   test: test/something.spec.ts (imports only from npm)
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        let test_dir = dir.path().join("test");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_path = src_dir.join("users.controller.ts");
+        std::fs::File::create(&prod_path).unwrap();
+
+        let test_path = test_dir.join("something.spec.ts");
+        let test_source =
+            "import { Test } from '@nestjs/testing';\ndescribe('npm', () => {});\n".to_string();
+
+        let production_files = vec![prod_path.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(test_path.to_string_lossy().into_owned(), test_source);
+
+        let extractor = TypeScriptExtractor::new();
+
+        // When: map_test_files_with_imports
+        let mappings =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: 未マッチ (test_files は空)
+        assert_eq!(mappings.len(), 1);
+        assert!(
+            mappings[0].test_files.is_empty(),
+            "expected no test files for npm-only import, got {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // MT4: 1テストが複数 production を import → 両方にマッピング
+    #[test]
+    fn mt4_one_test_imports_multiple_productions() {
+        use tempfile::TempDir;
+
+        // Given:
+        //   production A: src/a.service.ts
+        //   production B: src/b.service.ts
+        //   test: test/ab.spec.ts (imports both A and B)
+        let dir = TempDir::new().unwrap();
+        let src_dir = dir.path().join("src");
+        let test_dir = dir.path().join("test");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_a = src_dir.join("a.service.ts");
+        let prod_b = src_dir.join("b.service.ts");
+        std::fs::File::create(&prod_a).unwrap();
+        std::fs::File::create(&prod_b).unwrap();
+
+        let test_path = test_dir.join("ab.spec.ts");
+        let test_source = format!(
+            "import {{ A }} from '../src/a.service';\nimport {{ B }} from '../src/b.service';\ndescribe('ab', () => {{}});\n"
+        );
+
+        let production_files = vec![
+            prod_a.to_string_lossy().into_owned(),
+            prod_b.to_string_lossy().into_owned(),
+        ];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(test_path.to_string_lossy().into_owned(), test_source);
+
+        let extractor = TypeScriptExtractor::new();
+
+        // When: map_test_files_with_imports
+        let mappings =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: A と B 両方に test がマッピングされる
+        assert_eq!(mappings.len(), 2, "expected 2 FileMappings (A and B)");
+        for mapping in &mappings {
+            assert!(
+                mapping
+                    .test_files
+                    .contains(&test_path.to_string_lossy().into_owned()),
+                "expected ab.spec.ts mapped to {}, got {:?}",
+                mapping.production_file,
+                mapping.test_files
+            );
+        }
     }
 }

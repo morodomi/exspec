@@ -37,7 +37,7 @@ cargo run -- --lang rust .                      # self-dogfooding (BLOCK 0件を
 ## TDD Workflow
 
 ```
-SPEC -> sync-plan -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
+spec -> sync-plan -> plan-review -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
 ```
 
 | Phase | Action | Skill | 詳細 |
