@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-Phase 8a (Lint Reliability) in progress. v0.1.2 published to crates.io. 13 projects / 4 languages / ~45k tests dogfooded. 17 active rules, 4 languages, 716 tests.
+Phase 8a (Lint Reliability) + Phase 8b (observe PoC) in progress. v0.1.2 published to crates.io. 13 projects / 4 languages / ~45k tests dogfooded. 17 active rules, 4 languages, 741 tests.
 
 ## Progress
 
@@ -27,6 +27,20 @@ Phase 8a (Lint Reliability) in progress. v0.1.2 published to crates.io. 13 proje
 | 7 - OSS release (crates.io v0.1.2) | DONE |
 | 8a - Lint Reliability (BLOCK/WARN/INFO FP fixes) | IN PROGRESS |
 | 8b - observe PoC (static test-to-code mapping) | IN PROGRESS |
+
+### Phase 8b Task Progress
+
+| # | Task | Status |
+|---|------|--------|
+| 0 | Ground truth (nestjs/nest manual mapping) | TODO |
+| 1 | Production function extractor (TypeScript) | DONE |
+| 2 | NestJS route/decorator extractor | DONE |
+| 3a | Test-to-code mapper: file name convention (Layer 1) | TODO |
+| 3b | Test-to-code mapper: import tracing (Layer 2) | TODO |
+| 4a | Test status code assertion extractor | TODO |
+| 4b | Error-path gap analyzer | TODO |
+| 5 | `exspec --observe` CLI + Markdown output | TODO |
+| 6 | NestJS precision verification (ground truth comparison) | TODO |
 
 ## Supported Languages
 

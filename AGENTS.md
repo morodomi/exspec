@@ -37,13 +37,13 @@ cargo run -- --lang rust .                      # self-dogfooding (BLOCK 0件を
 ## TDD Workflow
 
 ```
-SPEC -> KICKOFF -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
+SPEC -> sync-plan -> RED -> GREEN -> REFACTOR -> REVIEW -> COMMIT
 ```
 
 | Phase | Action | Skill |
 |-------|--------|-------|
 | SPEC | 設計・テスト計画 (plan mode) | dev-crew:spec |
-| KICKOFF | Cycle doc作成 | dev-crew:kickoff |
+| sync-plan | Design Review Gate + Cycle doc作成 | dev-crew:orchestrate (Block 1) |
 | RED | テスト作成、失敗確認 | dev-crew:red |
 | GREEN | 最小限の実装 | dev-crew:green |
 | REFACTOR | コード品質改善 | dev-crew:refactor |
@@ -82,6 +82,11 @@ exspec/
 │   ├── lang-python/           Python固有
 │   │   └── queries/*.scm
 │   ├── lang-typescript/       TypeScript固有
+│   │   ├── queries/*.scm
+│   │   └── observe.rs         observe PoC (test-to-code mapping)
+│   ├── lang-php/              PHP固有
+│   │   └── queries/*.scm
+│   ├── lang-rust/             Rust固有
 │   │   └── queries/*.scm
 │   └── cli/                   CLIエントリポイント
 ├── tests/
