@@ -77,10 +77,11 @@ RED phase完了時またはコミット前に必ず実施すること。
 
 ```
 exspec/
-├── Cargo.toml
+├── Cargo.toml                 Workspace root (6 crates)
 ├── ROADMAP.md                 中期ロードマップ
 ├── crates/
 │   ├── core/                  言語非依存の解析エンジン
+│   │   ├── config.rs          .exspec.toml 設定パーサー
 │   │   ├── extractor.rs       テスト関数抽出
 │   │   ├── rules.rs           ルール定義・評価
 │   │   ├── metrics.rs         メトリクス計算
@@ -88,33 +89,47 @@ exspec/
 │   │   ├── hints.rs           ランタイムヒント (custom_patterns案内等)
 │   │   ├── query_utils.rs     tree-sitterクエリユーティリティ
 │   │   └── suppress.rs        インラインサプレッション処理
-│   ├── lang-python/           Python固有
-│   │   └── queries/*.scm
-│   ├── lang-typescript/       TypeScript固有
-│   │   ├── queries/*.scm
+│   ├── lang-python/           Python固有 (pytest)
+│   │   └── queries/*.scm      (14 queries)
+│   ├── lang-typescript/       TypeScript固有 (Jest/Vitest)
+│   │   ├── queries/*.scm      (15 queries, incl. production_function, decorator, import_mapping)
 │   │   └── observe.rs         observe PoC (production function/route抽出, test-to-code mapping)
-│   ├── lang-php/              PHP固有
-│   │   └── queries/*.scm
-│   ├── lang-rust/             Rust固有
-│   │   └── queries/*.scm
+│   ├── lang-php/              PHP固有 (PHPUnit/Pest)
+│   │   └── queries/*.scm      (13 queries)
+│   ├── lang-rust/             Rust固有 (cargo test)
+│   │   └── queries/*.scm      (12 queries)
 │   └── cli/                   CLIエントリポイント
 ├── tests/
-│   ├── fixtures/              各言語のサンプルテストコード (SPEC駆動)
-│   └── integration/
+│   └── fixtures/              各言語のサンプルテストコード (SPEC駆動)
+│       ├── python/
+│       ├── typescript/
+│       ├── php/
+│       ├── rust/
+│       └── config/
 ├── .exspec.toml               dogfooding用設定
 └── docs/
 ```
 
-### queries/*.scm (言語別)
+### queries/*.scm (言語別共通パターン)
 
 ```
 queries/
-  ├── test_function.scm      テスト関数の抽出
-  ├── mock_usage.scm         mock/stub/spy検出
-  ├── assertion.scm          assert文検出
-  ├── parameterized.scm      パラメタライズ検出
-  └── contract.scm           Pydantic/Pandera等検出
+  ├── test_function.scm        テスト関数の抽出
+  ├── assertion.scm            assert文検出
+  ├── mock_usage.scm           mock/stub/spy検出
+  ├── mock_assignment.scm      mock代入検出
+  ├── parameterized.scm        パラメタライズ検出
+  ├── how_not_what.scm         実装詳細アクセス検出
+  ├── private_in_assertion.scm private属性アクセス検出
+  ├── relational_assertion.scm リレーショナルアサーション検出
+  ├── error_test.scm           エラーテスト検出
+  ├── wait_and_see.scm         sleep/wait検出
+  ├── skip_test.scm            skip/only検出 (Python/PHP)
+  ├── import_contract.scm      契約ライブラリimport検出
+  └── import_pbt.scm           PBTライブラリimport検出
 ```
+
+TypeScript追加: `production_function.scm`, `decorator.scm`, `import_mapping.scm` (observe PoC用)
 
 ## Development Approach: SPEC-Driven
 

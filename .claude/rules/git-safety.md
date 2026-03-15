@@ -14,6 +14,7 @@
 1. All tests pass: `cargo test`
 2. Static analysis clean: `cargo clippy -- -D warnings`
 3. Format check: `cargo fmt --check`
+4. Self-dogfooding: `cargo run -- --lang rust .` (BLOCK 0件)
 
 ## Branch Strategy
 
