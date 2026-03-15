@@ -13,3 +13,11 @@
     (identifier) @symbol_name)
   source: (string
     (string_fragment) @module_specifier))
+
+;; Namespace import: import * as Ns from './module'
+(import_statement
+  (import_clause
+    (namespace_import
+      (identifier) @symbol_name))
+  source: (string
+    (string_fragment) @module_specifier))

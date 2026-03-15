@@ -613,6 +613,42 @@ fn find_class_info(method_node: Node, source: &[u8]) -> (Option<String>, bool) {
     (None, false)
 }
 
+/// Check if a symbol node belongs to a type-only import.
+/// Handles both `import type { X }` (statement-level) and `import { type X }` (specifier-level).
+fn is_type_only_import(symbol_node: Node) -> bool {
+    // Case 1: `import { type X }` — import_specifier has a "type" child
+    let parent = symbol_node.parent();
+    if let Some(p) = parent {
+        if p.kind() == "import_specifier" {
+            for i in 0..p.child_count() {
+                if let Some(child) = p.child(i) {
+                    if child.kind() == "type" {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // Case 2: `import type { X }` — import_statement has a "type" child (before import_clause)
+    // Walk up to import_statement
+    let mut current = Some(symbol_node);
+    while let Some(node) = current {
+        if node.kind() == "import_statement" {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "type" {
+                        return true;
+                    }
+                }
+            }
+            break;
+        }
+        current = node.parent();
+    }
+    false
+}
+
 /// Extract import statements from TypeScript source.
 /// Returns only relative imports (starting with "." or ".."); npm packages are excluded.
 impl TypeScriptExtractor {
@@ -632,11 +668,13 @@ impl TypeScriptExtractor {
         let mut result = Vec::new();
 
         while let Some(m) = matches.next() {
+            let mut symbol_node = None;
             let mut symbol = None;
             let mut specifier = None;
             let mut symbol_line = 0usize;
             for cap in m.captures {
                 if cap.index == symbol_idx {
+                    symbol_node = Some(cap.node);
                     symbol = Some(cap.node.utf8_text(source_bytes).unwrap_or(""));
                     symbol_line = cap.node.start_position().row + 1;
                 } else if cap.index == specifier_idx {
@@ -645,14 +683,25 @@ impl TypeScriptExtractor {
             }
             if let (Some(sym), Some(spec)) = (symbol, specifier) {
                 // Filter: only relative paths (./ or ../)
-                if spec.starts_with("./") || spec.starts_with("../") {
-                    result.push(ImportMapping {
-                        symbol_name: sym.to_string(),
-                        module_specifier: spec.to_string(),
-                        file: file_path.to_string(),
-                        line: symbol_line,
-                    });
+                if !spec.starts_with("./") && !spec.starts_with("../") {
+                    continue;
                 }
+
+                // Filter: skip type-only imports
+                // `import type { X }` → import_statement has "type" keyword child
+                // `import { type X }` → import_specifier has "type" keyword child
+                if let Some(snode) = symbol_node {
+                    if is_type_only_import(snode) {
+                        continue;
+                    }
+                }
+
+                result.push(ImportMapping {
+                    symbol_name: sym.to_string(),
+                    module_specifier: spec.to_string(),
+                    file: file_path.to_string(),
+                    line: symbol_line,
+                });
             }
         }
         result
@@ -1622,6 +1671,73 @@ mod tests {
 
         // Then: 空Vec
         assert!(imports.is_empty());
+    }
+
+    // IM8: namespace import (`import * as X from './module'`) が抽出される
+    #[test]
+    fn im8_namespace_import() {
+        // Given: import_namespace.ts with `import * as UsersController from './users.controller'`
+        let source = fixture("import_namespace.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_namespace.ts");
+
+        // Then: UsersController が symbol_name として抽出される
+        let found = imports.iter().find(|i| i.symbol_name == "UsersController");
+        assert!(
+            found.is_some(),
+            "expected UsersController in imports: {imports:?}"
+        );
+        assert_eq!(found.unwrap().module_specifier, "./users.controller");
+
+        // Then: helpers も相対パスなので抽出される
+        let helpers = imports.iter().find(|i| i.symbol_name == "helpers");
+        assert!(
+            helpers.is_some(),
+            "expected helpers in imports: {imports:?}"
+        );
+        assert_eq!(helpers.unwrap().module_specifier, "../utils/helpers");
+
+        // Then: npm パッケージ (express) は除外される
+        let express = imports.iter().find(|i| i.symbol_name == "express");
+        assert!(
+            express.is_none(),
+            "npm package should be excluded: {imports:?}"
+        );
+    }
+
+    // IM9: type-only import (`import type { X }`) が除外され、通常importは残る
+    #[test]
+    fn im9_type_only_import_excluded() {
+        // Given: import_type_only.ts with type-only and normal imports
+        let source = fixture("import_type_only.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(&source, "import_type_only.ts");
+
+        // Then: `import type { UserService }` は除外される
+        let user_service = imports.iter().find(|i| i.symbol_name == "UserService");
+        assert!(
+            user_service.is_none(),
+            "type-only import should be excluded: {imports:?}"
+        );
+
+        // Then: `import { type CreateUserDto }` (inline type modifier) も除外される
+        let create_dto = imports.iter().find(|i| i.symbol_name == "CreateUserDto");
+        assert!(
+            create_dto.is_none(),
+            "inline type modifier import should be excluded: {imports:?}"
+        );
+
+        // Then: `import { UsersController }` は残る
+        let controller = imports.iter().find(|i| i.symbol_name == "UsersController");
+        assert!(
+            controller.is_some(),
+            "normal import should remain: {imports:?}"
+        );
+        assert_eq!(controller.unwrap().module_specifier, "./users.controller");
     }
 
     // === resolve_import_path Tests (RP1-RP5) ===
