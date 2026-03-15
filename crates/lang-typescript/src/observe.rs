@@ -55,11 +55,11 @@ impl TypeScriptExtractor {
             .capture_index_for_name("arrow")
             .expect("@arrow capture not found");
 
-        // Use HashMap keyed by name node line to deduplicate overlapping patterns.
+        // Use HashMap keyed by (line, name) to deduplicate overlapping patterns.
         // Exported patterns and non-exported patterns match the same node;
         // match order is implementation-dependent, so we upgrade is_exported
         // to true if any pattern marks it exported.
-        let mut dedup: HashMap<usize, ProductionFunction> = HashMap::new();
+        let mut dedup: HashMap<(usize, String), ProductionFunction> = HashMap::new();
 
         let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
         while let Some(m) = matches.next() {
@@ -91,7 +91,7 @@ impl TypeScriptExtractor {
             };
 
             dedup
-                .entry(line)
+                .entry((line, name.clone()))
                 .and_modify(|existing| {
                     if is_exported {
                         existing.is_exported = true;
@@ -119,7 +119,10 @@ fn find_class_info(method_node: Node, source: &[u8]) -> (Option<String>, bool) {
         if node.kind() == "class_body" {
             if let Some(class_node) = node.parent() {
                 let class_kind = class_node.kind();
-                if class_kind == "class_declaration" || class_kind == "class" {
+                if class_kind == "class_declaration"
+                    || class_kind == "class"
+                    || class_kind == "abstract_class_declaration"
+                {
                     let class_name = class_node
                         .child_by_field_name("name")
                         .and_then(|n| n.utf8_text(source).ok())
@@ -384,5 +387,29 @@ mod tests {
 
         // Then: returns empty Vec
         assert!(funcs.is_empty());
+    }
+
+    // TC11: abstract class methods are extracted with class_name and export status
+    #[test]
+    fn abstract_class_methods_extracted() {
+        // Given: abstract_class.ts with exported and non-exported abstract classes
+        let source = fixture("abstract_class.ts");
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract production functions
+        let funcs = extractor.extract_production_functions(&source, "abstract_class.ts");
+
+        // Then: concrete methods are extracted (abstract methods have no body → method_signature, not method_definition)
+        let validate = funcs.iter().find(|f| f.name == "validate");
+        assert!(validate.is_some(), "expected validate to be extracted");
+        let validate = validate.unwrap();
+        assert_eq!(validate.class_name.as_deref(), Some("BaseService"));
+        assert!(validate.is_exported);
+
+        let process = funcs.iter().find(|f| f.name == "process");
+        assert!(process.is_some(), "expected process to be extracted");
+        let process = process.unwrap();
+        assert_eq!(process.class_name.as_deref(), Some("InternalBase"));
+        assert!(!process.is_exported);
     }
 }
