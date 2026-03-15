@@ -1,6 +1,6 @@
 ---
 feature: Import Tracing (Layer 2)
-phase: REVIEW
+phase: DONE
 complexity: medium
 test_count: 16
 risk_level: low
@@ -160,10 +160,15 @@ pub enum MappingStrategy {
 - Security: PASS (5) — canonicalize+starts_with ガード正常、symlink 防御OK
 - Correctness: WARN (35) → namespace import 未対応 (DISCOVERED)、mixed strategy (Reject: 設計意図通り)
 - Performance: PASS — 冗長 canonicalize は idempotent、PoC 許容
-- Codex review: 的外れ (dev-crew プラグイン自体をレビュー)
+- Codex review (1回目): 的外れ (dev-crew プラグイン自体をレビュー)
+- Codex review (2回目): WARN (2 warn, 1 info)
+  - Accept: Layer 1マッチ済みテストの別production import漏れ → `30432ec` で修正
+  - DISCOVERED: type-only import 除外 → issue #84
+  - Reject: 冗長 canonicalize (idempotent、PoC許容)
 - 統合: PASS (score: 20)
 - Phase completed
 
 ## DISCOVERED
 
 - [x] namespace import (`import * as Ns from './module'`) の Layer 2 対応 → issue #83
+- [x] type-only import (`import type { Foo }`) の除外 → issue #84

@@ -687,11 +687,9 @@ impl TypeScriptExtractor {
             .flat_map(|m| m.test_files.iter().cloned())
             .collect();
 
-        // Layer 2: import tracing for unmatched test files only
+        // Layer 2: import tracing for all test files (Layer 1 matched tests may
+        // also import other production files not matched by filename convention)
         for (test_file, source) in test_sources {
-            if layer1_matched.contains(test_file) {
-                continue;
-            }
             let imports = self.extract_imports(source, test_file);
             let from_file = Path::new(test_file);
             let mut matched_indices = std::collections::HashSet::new();
@@ -705,7 +703,10 @@ impl TypeScriptExtractor {
                 }
             }
             for idx in matched_indices {
-                mappings[idx].test_files.push(test_file.clone());
+                // Avoid duplicates: skip if already added by Layer 1
+                if !mappings[idx].test_files.contains(test_file) {
+                    mappings[idx].test_files.push(test_file.clone());
+                }
             }
         }
 
