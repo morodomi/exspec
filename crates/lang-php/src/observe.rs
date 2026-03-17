@@ -1,0 +1,907 @@
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Query, QueryCursor};
+
+use exspec_core::observe::{
+    BarrelReExport, FileMapping, ImportMapping, MappingStrategy, ObserveExtractor,
+    ProductionFunction,
+};
+
+use super::PhpExtractor;
+
+const PRODUCTION_FUNCTION_QUERY: &str = include_str!("../queries/production_function.scm");
+static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+
+const IMPORT_MAPPING_QUERY: &str = include_str!("../queries/import_mapping.scm");
+static IMPORT_MAPPING_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+
+fn php_language() -> tree_sitter::Language {
+    tree_sitter_php::LANGUAGE_PHP.into()
+}
+
+fn cached_query<'a>(lock: &'a OnceLock<Query>, source: &str) -> &'a Query {
+    lock.get_or_init(|| Query::new(&php_language(), source).expect("invalid query"))
+}
+
+// ---------------------------------------------------------------------------
+// Stem helpers
+// ---------------------------------------------------------------------------
+
+/// Extract stem from a PHP test file path.
+/// `tests/UserTest.php` -> `Some("User")`   (Test suffix, PHPUnit)
+/// `tests/user_test.php` -> `Some("user")`  (_test suffix, Pest)
+/// `tests/Unit/OrderServiceTest.php` -> `Some("OrderService")`
+/// `src/User.php` -> `None`
+pub fn test_stem(path: &str) -> Option<&str> {
+    let file_name = Path::new(path).file_name()?.to_str()?;
+    // Must end with .php
+    let stem = file_name.strip_suffix(".php")?;
+
+    // *Test.php (PHPUnit convention)
+    if let Some(rest) = stem.strip_suffix("Test") {
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+
+    // *_test.php (Pest convention)
+    if let Some(rest) = stem.strip_suffix("_test") {
+        if !rest.is_empty() {
+            return Some(rest);
+        }
+    }
+
+    None
+}
+
+/// Extract stem from a PHP production file path.
+/// `src/User.php` -> `Some("User")`
+/// `src/Models/User.php` -> `Some("User")`
+/// `tests/UserTest.php` -> `None`
+pub fn production_stem(path: &str) -> Option<&str> {
+    // Test files are not production files
+    if test_stem(path).is_some() {
+        return None;
+    }
+
+    let file_name = Path::new(path).file_name()?.to_str()?;
+    let stem = file_name.strip_suffix(".php")?;
+
+    if stem.is_empty() {
+        return None;
+    }
+
+    Some(stem)
+}
+
+/// Check if a file is a non-SUT helper (not subject under test).
+pub fn is_non_sut_helper(file_path: &str, is_known_production: bool) -> bool {
+    // If the file is already known to be a production file, it's not a helper.
+    if is_known_production {
+        return false;
+    }
+
+    let normalized = file_path.replace('\\', "/");
+    let file_name = Path::new(&normalized)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+
+    // TestCase.php (base test class)
+    if file_name == "TestCase.php" {
+        return true;
+    }
+
+    // *Factory.php in tests/ (Laravel factory)
+    if file_name.ends_with("Factory.php") {
+        let in_tests = normalized.starts_with("tests/") || normalized.contains("/tests/");
+        if in_tests {
+            return true;
+        }
+    }
+
+    // Abstract*.php in tests/
+    if file_name.starts_with("Abstract") && file_name.ends_with(".php") {
+        let in_tests = normalized.starts_with("tests/") || normalized.contains("/tests/");
+        if in_tests {
+            return true;
+        }
+    }
+
+    // Trait*.php or *Trait.php in tests/ (test traits)
+    let in_tests = normalized.starts_with("tests/") || normalized.contains("/tests/");
+    if in_tests
+        && file_name.ends_with(".php")
+        && (file_name.starts_with("Trait") || file_name.ends_with("Trait.php"))
+    {
+        return true;
+    }
+
+    // Files in tests/Traits/ directory
+    if normalized.contains("/tests/Traits/") || normalized.starts_with("tests/Traits/") {
+        return true;
+    }
+
+    // Kernel.php
+    if file_name == "Kernel.php" {
+        return true;
+    }
+
+    // bootstrap.php or bootstrap/*.php
+    if file_name == "bootstrap.php" {
+        return true;
+    }
+    if normalized.starts_with("bootstrap/") || normalized.contains("/bootstrap/") {
+        return true;
+    }
+
+    false
+}
+
+// ---------------------------------------------------------------------------
+// External package detection
+// ---------------------------------------------------------------------------
+
+/// Known external PHP package namespace prefixes to skip during import resolution.
+const EXTERNAL_NAMESPACES: &[&str] = &[
+    "PHPUnit",
+    "Illuminate",
+    "Symfony",
+    "Doctrine",
+    "Mockery",
+    "Carbon",
+    "Pest",
+    "Laravel",
+    "Monolog",
+    "Psr",
+    "GuzzleHttp",
+    "League",
+    "Ramsey",
+    "Spatie",
+    "Nette",
+    "Webmozart",
+    "PhpParser",
+    "SebastianBergmann",
+];
+
+fn is_external_namespace(namespace: &str) -> bool {
+    let first_segment = namespace.split('/').next().unwrap_or("");
+    EXTERNAL_NAMESPACES
+        .iter()
+        .any(|&ext| first_segment.eq_ignore_ascii_case(ext))
+}
+
+// ---------------------------------------------------------------------------
+// ObserveExtractor impl
+// ---------------------------------------------------------------------------
+
+impl ObserveExtractor for PhpExtractor {
+    fn extract_production_functions(
+        &self,
+        source: &str,
+        file_path: &str,
+    ) -> Vec<ProductionFunction> {
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+        let query = cached_query(&PRODUCTION_FUNCTION_QUERY_CACHE, PRODUCTION_FUNCTION_QUERY);
+
+        let name_idx = query.capture_index_for_name("name");
+        let class_name_idx = query.capture_index_for_name("class_name");
+        let method_name_idx = query.capture_index_for_name("method_name");
+        let function_idx = query.capture_index_for_name("function");
+        let method_idx = query.capture_index_for_name("method");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+        let mut result = Vec::new();
+
+        while let Some(m) = matches.next() {
+            let mut fn_name: Option<String> = None;
+            let mut class_name: Option<String> = None;
+            let mut line: usize = 1;
+            let mut is_exported = true; // default: top-level functions are exported
+            let mut method_node: Option<tree_sitter::Node> = None;
+
+            for cap in m.captures {
+                let text = cap.node.utf8_text(source_bytes).unwrap_or("").to_string();
+                let node_line = cap.node.start_position().row + 1;
+
+                if name_idx == Some(cap.index) {
+                    fn_name = Some(text);
+                    line = node_line;
+                } else if class_name_idx == Some(cap.index) {
+                    class_name = Some(text);
+                } else if method_name_idx == Some(cap.index) {
+                    fn_name = Some(text);
+                    line = node_line;
+                }
+
+                // Capture method node for visibility check
+                if method_idx == Some(cap.index) {
+                    method_node = Some(cap.node);
+                }
+
+                // Top-level function: always exported
+                if function_idx == Some(cap.index) {
+                    is_exported = true;
+                }
+            }
+
+            // Determine visibility from method node
+            if let Some(method) = method_node {
+                is_exported = has_public_visibility(method, source_bytes);
+            }
+
+            if let Some(name) = fn_name {
+                result.push(ProductionFunction {
+                    name,
+                    file: file_path.to_string(),
+                    line,
+                    class_name,
+                    is_exported,
+                });
+            }
+        }
+
+        result
+    }
+
+    fn extract_imports(&self, _source: &str, _file_path: &str) -> Vec<ImportMapping> {
+        // PHP has no relative imports; Layer 2 uses PSR-4 namespace resolution
+        Vec::new()
+    }
+
+    fn extract_all_import_specifiers(&self, source: &str) -> Vec<(String, Vec<String>)> {
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+        let query = cached_query(&IMPORT_MAPPING_QUERY_CACHE, IMPORT_MAPPING_QUERY);
+
+        let namespace_path_idx = query.capture_index_for_name("namespace_path");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+
+        let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if namespace_path_idx != Some(cap.index) {
+                    continue;
+                }
+                let raw = cap.node.utf8_text(source_bytes).unwrap_or("");
+                // Convert `App\Models\User` -> `App/Models/User`
+                let fs_path = raw.replace('\\', "/");
+
+                // Skip external packages
+                if is_external_namespace(&fs_path) {
+                    continue;
+                }
+
+                // Split into module path and symbol
+                // `App/Models/User` -> module=`App/Models`, symbol=`User`
+                let parts: Vec<&str> = fs_path.splitn(2, '/').collect();
+                if parts.len() < 2 {
+                    // Single segment (no slash): use as both module and symbol
+                    // e.g., `use User;` -> module="", symbol="User"
+                    // Skip these edge cases
+                    continue;
+                }
+
+                // Find the last '/' to split module from symbol
+                if let Some(last_slash) = fs_path.rfind('/') {
+                    let module_path = &fs_path[..last_slash];
+                    let symbol = &fs_path[last_slash + 1..];
+                    if !module_path.is_empty() && !symbol.is_empty() {
+                        result_map
+                            .entry(module_path.to_string())
+                            .or_default()
+                            .push(symbol.to_string());
+                    }
+                }
+            }
+        }
+
+        result_map.into_iter().collect()
+    }
+
+    fn extract_barrel_re_exports(&self, _source: &str, _file_path: &str) -> Vec<BarrelReExport> {
+        // PHP has no barrel export pattern
+        Vec::new()
+    }
+
+    fn source_extensions(&self) -> &[&str] {
+        &["php"]
+    }
+
+    fn index_file_names(&self) -> &[&str] {
+        // PHP has no index files equivalent
+        &[]
+    }
+
+    fn production_stem<'a>(&self, path: &'a str) -> Option<&'a str> {
+        production_stem(path)
+    }
+
+    fn test_stem<'a>(&self, path: &'a str) -> Option<&'a str> {
+        test_stem(path)
+    }
+
+    fn is_non_sut_helper(&self, file_path: &str, is_known_production: bool) -> bool {
+        is_non_sut_helper(file_path, is_known_production)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Concrete methods (not in trait)
+// ---------------------------------------------------------------------------
+
+impl PhpExtractor {
+    /// Layer 1 + Layer 2 (PSR-4): Map test files to production files.
+    pub fn map_test_files_with_imports(
+        &self,
+        production_files: &[String],
+        test_sources: &HashMap<String, String>,
+        scan_root: &Path,
+    ) -> Vec<FileMapping> {
+        let test_file_list: Vec<String> = test_sources.keys().cloned().collect();
+
+        // Layer 1: filename convention (stem matching)
+        let mut mappings =
+            exspec_core::observe::map_test_files(self, production_files, &test_file_list);
+
+        // Build canonical path -> production index lookup
+        let canonical_root = match scan_root.canonicalize() {
+            Ok(r) => r,
+            Err(_) => return mappings,
+        };
+        let mut canonical_to_idx: HashMap<String, usize> = HashMap::new();
+        for (idx, prod) in production_files.iter().enumerate() {
+            if let Ok(canonical) = Path::new(prod).canonicalize() {
+                canonical_to_idx.insert(canonical.to_string_lossy().into_owned(), idx);
+            }
+        }
+
+        // Record Layer 1 matches per production file index
+        let layer1_tests_per_prod: Vec<std::collections::HashSet<String>> = mappings
+            .iter()
+            .map(|m| m.test_files.iter().cloned().collect())
+            .collect();
+
+        // Layer 2: PSR-4 convention import resolution
+        for (test_file, source) in test_sources {
+            let specifiers =
+                <Self as ObserveExtractor>::extract_all_import_specifiers(self, source);
+            let mut matched_indices = std::collections::HashSet::<usize>::new();
+
+            for (module_path, _symbols) in &specifiers {
+                // PSR-4 resolution:
+                // `App/Models/User` -> try `src/Models/User.php`, `app/Models/User.php`, etc.
+                //
+                // Strategy: strip the first segment (PSR-4 prefix like "App")
+                // and search for the remaining path under common directories.
+                let parts: Vec<&str> = module_path.splitn(2, '/').collect();
+                let path_without_prefix = if parts.len() == 2 {
+                    parts[1]
+                } else {
+                    module_path
+                };
+
+                // Derive the PHP file name from the last segment of module_path
+                // e.g., `App/Models` -> last segment is `Models` -> file is `Models.php`
+                // But module_path is actually the directory, not the file.
+                // The symbol is in the symbols list, but we need to reconstruct the file path.
+                // Actually, at this point module_path = `App/Models` and symbol could be `User`,
+                // so the full file is `Models/User.php` (without prefix).
+
+                // We need to get the symbols too
+                for symbol in _symbols {
+                    let file_name = format!("{symbol}.php");
+
+                    // Try: <scan_root>/<common_prefix>/<path_without_prefix>/<symbol>.php
+                    let common_prefixes = ["src", "app", "lib", ""];
+                    for prefix in &common_prefixes {
+                        let candidate = if prefix.is_empty() {
+                            canonical_root.join(path_without_prefix).join(&file_name)
+                        } else {
+                            canonical_root
+                                .join(prefix)
+                                .join(path_without_prefix)
+                                .join(&file_name)
+                        };
+
+                        if let Ok(canonical_candidate) = candidate.canonicalize() {
+                            let candidate_str = canonical_candidate.to_string_lossy().into_owned();
+                            if let Some(&idx) = canonical_to_idx.get(&candidate_str) {
+                                matched_indices.insert(idx);
+                            }
+                        }
+                    }
+
+                    // Also try with the first segment kept (in case directory matches namespace 1:1)
+                    let file_with_prefix = canonical_root.join(module_path).join(&file_name);
+                    if let Ok(canonical_candidate) = file_with_prefix.canonicalize() {
+                        let candidate_str = canonical_candidate.to_string_lossy().into_owned();
+                        if let Some(&idx) = canonical_to_idx.get(&candidate_str) {
+                            matched_indices.insert(idx);
+                        }
+                    }
+                }
+            }
+
+            for idx in matched_indices {
+                if !mappings[idx].test_files.contains(test_file) {
+                    mappings[idx].test_files.push(test_file.clone());
+                }
+            }
+        }
+
+        // Update strategy: if a production file had no Layer 1 matches but has Layer 2 matches,
+        // set strategy to ImportTracing
+        for (i, mapping) in mappings.iter_mut().enumerate() {
+            let has_layer1 = !layer1_tests_per_prod[i].is_empty();
+            if !has_layer1 && !mapping.test_files.is_empty() {
+                mapping.strategy = MappingStrategy::ImportTracing;
+            }
+        }
+
+        mappings
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Visibility helper
+// ---------------------------------------------------------------------------
+
+/// Check if a PHP method_declaration node has `public` visibility.
+/// Returns true for public, false for private/protected.
+/// If no visibility_modifier child is found, defaults to true (public by convention in PHP).
+fn has_public_visibility(node: tree_sitter::Node, source_bytes: &[u8]) -> bool {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == "visibility_modifier" {
+                let text = child.utf8_text(source_bytes).unwrap_or("");
+                return text == "public";
+            }
+        }
+    }
+    // No visibility modifier -> treat as public by default
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-01: tests/UserTest.php -> test_stem = Some("User")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_01_test_suffix() {
+        // Given: a file named UserTest.php in tests/
+        // When: test_stem is called
+        // Then: returns Some("User")
+        assert_eq!(test_stem("tests/UserTest.php"), Some("User"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-02: tests/user_test.php -> test_stem = Some("user")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_02_pest_suffix() {
+        // Given: a Pest-style file user_test.php
+        // When: test_stem is called
+        // Then: returns Some("user")
+        assert_eq!(test_stem("tests/user_test.php"), Some("user"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-03: tests/Unit/OrderServiceTest.php -> test_stem = Some("OrderService")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_03_nested() {
+        // Given: a nested test file OrderServiceTest.php
+        // When: test_stem is called
+        // Then: returns Some("OrderService")
+        assert_eq!(
+            test_stem("tests/Unit/OrderServiceTest.php"),
+            Some("OrderService")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-04: src/User.php -> test_stem = None
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_04_non_test() {
+        // Given: a production file src/User.php
+        // When: test_stem is called
+        // Then: returns None
+        assert_eq!(test_stem("src/User.php"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-05: src/User.php -> production_stem = Some("User")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_05_prod_stem() {
+        // Given: a production file src/User.php
+        // When: production_stem is called
+        // Then: returns Some("User")
+        assert_eq!(production_stem("src/User.php"), Some("User"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-06: src/Models/User.php -> production_stem = Some("User")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_06_prod_nested() {
+        // Given: a nested production file src/Models/User.php
+        // When: production_stem is called
+        // Then: returns Some("User")
+        assert_eq!(production_stem("src/Models/User.php"), Some("User"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-STEM-07: tests/UserTest.php -> production_stem = None
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_stem_07_test_not_prod() {
+        // Given: a test file tests/UserTest.php
+        // When: production_stem is called
+        // Then: returns None (test files are not production files)
+        assert_eq!(production_stem("tests/UserTest.php"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-01: tests/TestCase.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_01_test_case() {
+        // Given: the base test class TestCase.php
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("tests/TestCase.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-02: tests/UserFactory.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_02_factory() {
+        // Given: a Laravel factory file in tests/
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("tests/UserFactory.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-03: src/User.php -> is_non_sut_helper = false
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_03_production() {
+        // Given: a regular production file
+        // When: is_non_sut_helper is called
+        // Then: returns false
+        assert!(!is_non_sut_helper("src/User.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-04: tests/Traits/CreatesUsers.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_04_test_trait() {
+        // Given: a test trait in tests/Traits/
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("tests/Traits/CreatesUsers.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-05: bootstrap/app.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_05_bootstrap() {
+        // Given: a bootstrap file
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("bootstrap/app.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FUNC-01: public function createUser() -> name="createUser", is_exported=true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_func_01_public_method() {
+        // Given: a class with a public method
+        // When: extract_production_functions is called
+        // Then: name="createUser", is_exported=true
+        let ext = PhpExtractor::new();
+        let source = "<?php\nclass User {\n    public function createUser() {}\n}";
+        let fns = ext.extract_production_functions(source, "src/User.php");
+        let f = fns.iter().find(|f| f.name == "createUser").unwrap();
+        assert!(f.is_exported);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FUNC-02: private function helper() -> name="helper", is_exported=false
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_func_02_private_method() {
+        // Given: a class with a private method
+        // When: extract_production_functions is called
+        // Then: name="helper", is_exported=false
+        let ext = PhpExtractor::new();
+        let source = "<?php\nclass User {\n    private function helper() {}\n}";
+        let fns = ext.extract_production_functions(source, "src/User.php");
+        let f = fns.iter().find(|f| f.name == "helper").unwrap();
+        assert!(!f.is_exported);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FUNC-03: class User { public function save() } -> class_name=Some("User")
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_func_03_class_method() {
+        // Given: a class User with a public method save()
+        // When: extract_production_functions is called
+        // Then: name="save", class_name=Some("User")
+        let ext = PhpExtractor::new();
+        let source = "<?php\nclass User {\n    public function save() {}\n}";
+        let fns = ext.extract_production_functions(source, "src/User.php");
+        let f = fns.iter().find(|f| f.name == "save").unwrap();
+        assert_eq!(f.class_name, Some("User".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FUNC-04: function global_helper() (top-level) -> exported
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_func_04_top_level_function() {
+        // Given: a top-level function global_helper()
+        // When: extract_production_functions is called
+        // Then: name="global_helper", is_exported=true
+        let ext = PhpExtractor::new();
+        let source = "<?php\nfunction global_helper() {\n    return 42;\n}";
+        let fns = ext.extract_production_functions(source, "src/helpers.php");
+        let f = fns.iter().find(|f| f.name == "global_helper").unwrap();
+        assert!(f.is_exported);
+        assert_eq!(f.class_name, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-IMP-01: use App\Models\User; -> ("App/Models", ["User"])
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_imp_01_app_models() {
+        // Given: a use statement for App\Models\User
+        // When: extract_all_import_specifiers is called
+        // Then: returns ("App/Models", ["User"])
+        let ext = PhpExtractor::new();
+        let source = "<?php\nuse App\\Models\\User;\n";
+        let imports = ext.extract_all_import_specifiers(source);
+        assert!(
+            imports
+                .iter()
+                .any(|(m, s)| m == "App/Models" && s.contains(&"User".to_string())),
+            "expected App/Models -> [User], got: {imports:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-IMP-02: use App\Services\UserService; -> ("App/Services", ["UserService"])
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_imp_02_app_services() {
+        // Given: a use statement for App\Services\UserService
+        // When: extract_all_import_specifiers is called
+        // Then: returns ("App/Services", ["UserService"])
+        let ext = PhpExtractor::new();
+        let source = "<?php\nuse App\\Services\\UserService;\n";
+        let imports = ext.extract_all_import_specifiers(source);
+        assert!(
+            imports
+                .iter()
+                .any(|(m, s)| m == "App/Services" && s.contains(&"UserService".to_string())),
+            "expected App/Services -> [UserService], got: {imports:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-IMP-03: use PHPUnit\Framework\TestCase; -> external package -> skipped
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_imp_03_external_phpunit() {
+        // Given: a use statement for external PHPUnit package
+        // When: extract_all_import_specifiers is called
+        // Then: returns empty (external packages are filtered)
+        let ext = PhpExtractor::new();
+        let source = "<?php\nuse PHPUnit\\Framework\\TestCase;\n";
+        let imports = ext.extract_all_import_specifiers(source);
+        assert!(
+            imports.is_empty(),
+            "external PHPUnit should be filtered, got: {imports:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-IMP-04: use Illuminate\Http\Request; -> external package -> skipped
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_imp_04_external_illuminate() {
+        // Given: a use statement for external Illuminate (Laravel) package
+        // When: extract_all_import_specifiers is called
+        // Then: returns empty (external packages are filtered)
+        let ext = PhpExtractor::new();
+        let source = "<?php\nuse Illuminate\\Http\\Request;\n";
+        let imports = ext.extract_all_import_specifiers(source);
+        assert!(
+            imports.is_empty(),
+            "external Illuminate should be filtered, got: {imports:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-E2E-01: User.php + UserTest.php in the same directory -> Layer 1 stem match
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_e2e_01_stem_match() {
+        // Given: production file User.php and test file UserTest.php in the same directory
+        // (Layer 1 stem matching works when files share the same parent directory)
+        // When: map_test_files_with_imports is called
+        // Then: UserTest.php is matched to User.php via Layer 1 stem matching
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+
+        let prod_file = dir.path().join("User.php");
+        std::fs::write(&prod_file, "<?php\nclass User {}").unwrap();
+
+        let test_file = dir.path().join("UserTest.php");
+        std::fs::write(&test_file, "<?php\nclass UserTest extends TestCase {}").unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            "<?php\nclass UserTest extends TestCase {}".to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        assert!(!mappings.is_empty(), "expected at least one mapping");
+        let user_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("User.php"))
+            .expect("expected User.php in mappings");
+        assert!(
+            !user_mapping.test_files.is_empty(),
+            "expected UserTest.php to be mapped to User.php via Layer 1 stem match"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-E2E-02: tests/ServiceTest.php imports use App\Services\OrderService
+    //             -> Layer 2 PSR-4 import match
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_e2e_02_import_match() {
+        // Given: production file app/Services/OrderService.php
+        //        and test file tests/ServiceTest.php with `use App\Services\OrderService;`
+        // When: map_test_files_with_imports is called
+        // Then: ServiceTest.php is matched to OrderService.php via Layer 2 import tracing
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let services_dir = dir.path().join("app").join("Services");
+        std::fs::create_dir_all(&services_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = services_dir.join("OrderService.php");
+        std::fs::write(&prod_file, "<?php\nclass OrderService {}").unwrap();
+
+        let test_file = test_dir.join("ServiceTest.php");
+        let test_source =
+            "<?php\nuse App\\Services\\OrderService;\nclass ServiceTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        let order_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("OrderService.php"))
+            .expect("expected OrderService.php in mappings");
+        assert!(
+            !order_mapping.test_files.is_empty(),
+            "expected ServiceTest.php to be mapped to OrderService.php via import tracing"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-E2E-03: tests/TestCase.php -> helper exclusion
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_e2e_03_helper_exclusion() {
+        // Given: a TestCase.php base class in tests/
+        // When: map_test_files_with_imports is called
+        // Then: TestCase.php is excluded (is_non_sut_helper = true)
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = src_dir.join("User.php");
+        std::fs::write(&prod_file, "<?php\nclass User {}").unwrap();
+
+        // TestCase.php should be treated as a helper, not a test file
+        let test_case_file = test_dir.join("TestCase.php");
+        std::fs::write(&test_case_file, "<?php\nabstract class TestCase {}").unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_case_file.to_string_lossy().into_owned(),
+            "<?php\nabstract class TestCase {}".to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // TestCase.php should not be matched to User.php
+        let user_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("User.php"));
+        if let Some(mapping) = user_mapping {
+            assert!(
+                mapping.test_files.is_empty()
+                    || !mapping
+                        .test_files
+                        .iter()
+                        .any(|t| t.contains("TestCase.php")),
+                "TestCase.php should not be mapped as a test file for User.php"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-CLI-01: observe --lang php . -> CLI dispatch verification
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_cli_01_dispatch() {
+        // Given: a tempdir with a PHP file
+        // When: PhpExtractor::map_test_files_with_imports is called on an empty project
+        // Then: returns an empty (or valid) mapping without panicking
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let ext = PhpExtractor::new();
+        let production_files: Vec<String> = vec![];
+        let test_sources: HashMap<String, String> = HashMap::new();
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+        assert!(mappings.is_empty());
+    }
+}

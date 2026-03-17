@@ -497,6 +497,43 @@ fn run_observe(args: ObserveArgs) {
                 println!("{output}");
             }
         }
+        "php" => {
+            let php_extractor = PhpExtractor::new();
+            let discovered = discover_files(root, Some("php"), &config.ignore_patterns);
+            let test_files: Vec<String> = discovered
+                .test_files
+                .get(&Language::Php)
+                .cloned()
+                .unwrap_or_default();
+            let production_files = &discovered.source_files;
+
+            let mut test_sources: HashMap<String, String> = HashMap::new();
+            for test_file in &test_files {
+                if let Ok(source) = std::fs::read_to_string(test_file) {
+                    test_sources.insert(test_file.clone(), source);
+                }
+            }
+
+            let file_mappings = php_extractor.map_test_files_with_imports(
+                production_files,
+                &test_sources,
+                Path::new(root),
+            );
+
+            let report = build_observe_report(
+                &file_mappings,
+                production_files,
+                test_files.len(),
+                Vec::new(),
+            );
+            let output = match args.format.as_str() {
+                "json" => report.format_json(),
+                _ => report.format_terminal(),
+            };
+            if !output.is_empty() {
+                println!("{output}");
+            }
+        }
         _ => {
             eprintln!("error: observe is not yet supported for {}", args.lang);
             process::exit(1);
