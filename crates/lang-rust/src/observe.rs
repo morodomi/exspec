@@ -287,7 +287,7 @@ impl ObserveExtractor for RustExtractor {
         for i in 0..root.child_count() {
             let child = root.child(i).unwrap();
 
-            // pub mod foo; -> BarrelReExport { from_specifier: "./foo", wildcard: false }
+            // pub mod foo; -> BarrelReExport { from_specifier: "./foo", wildcard: true }
             if child.kind() == "mod_item" && has_pub_visibility(child) {
                 // Check it's a declaration (no body block)
                 let has_body = child.child_by_field_name("body").is_some();
@@ -297,7 +297,7 @@ impl ObserveExtractor for RustExtractor {
                         result.push(BarrelReExport {
                             symbols: Vec::new(),
                             from_specifier: format!("./{mod_name}"),
-                            wildcard: false,
+                            wildcard: true,
                         });
                     }
                 }
@@ -1185,10 +1185,10 @@ mod tests {
         let extractor = RustExtractor::new();
         let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
 
-        // Then: from_specifier="./user", wildcard=false
+        // Then: from_specifier="./user", wildcard=true
         let entry = result.iter().find(|e| e.from_specifier == "./user");
         assert!(entry.is_some(), "./user not found in {:?}", result);
-        assert!(!entry.unwrap().wildcard);
+        assert!(entry.unwrap().wildcard);
     }
 
     // -----------------------------------------------------------------------
@@ -1586,6 +1586,172 @@ mod tests {
             MappingStrategy::ImportTracing,
             "Expected ImportTracing strategy, got: {:?}",
             mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-DEEP-REEXPORT-01: 2段 re-export — src/models/mod.rs: pub mod user;
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_deep_reexport_01_two_hop() {
+        // Given: tempdir に以下を作成
+        //   Cargo.toml: [package]\nname = "my-crate"\n...
+        //   src/models/mod.rs: pub mod user;
+        //   src/models/user.rs: pub struct User;
+        //   tests/test_models.rs: use my_crate::models::User;
+        let tmp = tempfile::tempdir().unwrap();
+        let src_models_dir = tmp.path().join("src").join("models");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_models_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let mod_rs = src_models_dir.join("mod.rs");
+        std::fs::write(&mod_rs, "pub mod user;\n").unwrap();
+
+        let user_rs = src_models_dir.join("user.rs");
+        std::fs::write(&user_rs, "pub struct User;\n").unwrap();
+
+        let test_models_rs = tests_dir.join("test_models.rs");
+        let test_source = "use my_crate::models::User;\n\n#[test]\nfn test_user() {}\n";
+        std::fs::write(&test_models_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let user_path = user_rs.to_string_lossy().into_owned();
+        let test_path = test_models_rs.to_string_lossy().into_owned();
+        let production_files = vec![user_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports を呼ぶ
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: test_models.rs → user.rs が Layer 2 (ImportTracing) でマッチ
+        let mapping = result.iter().find(|m| m.production_file == user_path);
+        assert!(mapping.is_some(), "production file mapping not found");
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_models.rs to map to user.rs via Layer 2 (pub mod chain), got: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "Expected ImportTracing strategy, got: {:?}",
+            mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-DEEP-REEXPORT-02: 3段 re-export — lib.rs → models/mod.rs → user.rs
+    // テストが `use my_crate::models::User;` (user セグメントなし) のみを使うため
+    // pub mod wildcard chain なしでは user.rs にマッチできない
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_deep_reexport_02_three_hop() {
+        // Given: tempdir に以下を作成
+        //   Cargo.toml: [package]\nname = "my-crate"\n...
+        //   src/lib.rs: pub mod models;
+        //   src/models/mod.rs: pub mod user;
+        //   src/models/user.rs: pub struct User;
+        //   tests/test_account.rs: use my_crate::models::User; (user セグメントなし)
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        let src_models_dir = src_dir.join("models");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_models_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        std::fs::write(src_dir.join("lib.rs"), "pub mod models;\n").unwrap();
+
+        let mod_rs = src_models_dir.join("mod.rs");
+        std::fs::write(&mod_rs, "pub mod user;\n").unwrap();
+
+        let user_rs = src_models_dir.join("user.rs");
+        std::fs::write(&user_rs, "pub struct User;\n").unwrap();
+
+        // test_account.rs: ファイル名は user と無関係 → Layer 1 ではマッチしない
+        let test_account_rs = tests_dir.join("test_account.rs");
+        let test_source = "use my_crate::models::User;\n\n#[test]\nfn test_account() {}\n";
+        std::fs::write(&test_account_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let user_path = user_rs.to_string_lossy().into_owned();
+        let test_path = test_account_rs.to_string_lossy().into_owned();
+        let production_files = vec![user_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports を呼ぶ
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: test_account.rs → user.rs が Layer 2 (ImportTracing) でマッチ
+        // (lib.rs → models/ → pub mod user; の wildcard chain を辿る必要がある)
+        let mapping = result.iter().find(|m| m.production_file == user_path);
+        assert!(mapping.is_some(), "production file mapping not found");
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_account.rs to map to user.rs via Layer 2 (3-hop pub mod chain), got: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "Expected ImportTracing strategy, got: {:?}",
+            mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-DEEP-REEXPORT-03: pub use + pub mod 混在 → 両エントリ返す
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_deep_reexport_03_pub_use_and_pub_mod() {
+        // Given: mod.rs with `pub mod internal;` and `pub use internal::Exported;`
+        let source = "pub mod internal;\npub use internal::Exported;\n";
+
+        // When: extract_barrel_re_exports is called
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: 2エントリ返す
+        //   1. from_specifier="./internal", wildcard=true  (pub mod)
+        //   2. from_specifier="./internal", symbols=["Exported"]  (pub use)
+        let wildcard_entry = result
+            .iter()
+            .find(|e| e.from_specifier == "./internal" && e.wildcard);
+        assert!(
+            wildcard_entry.is_some(),
+            "Expected wildcard=true entry for pub mod internal, got: {:?}",
+            result
+        );
+
+        let symbol_entry = result.iter().find(|e| {
+            e.from_specifier == "./internal"
+                && !e.wildcard
+                && e.symbols.contains(&"Exported".to_string())
+        });
+        assert!(
+            symbol_entry.is_some(),
+            "Expected symbols=[\"Exported\"] entry for pub use internal::Exported, got: {:?}",
+            result
         );
     }
 }
