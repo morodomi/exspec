@@ -1,3 +1,5 @@
+pub mod observe;
+
 use std::sync::OnceLock;
 
 use exspec_core::extractor::{FileAnalysis, LanguageExtractor, TestAnalysis, TestFunction};
