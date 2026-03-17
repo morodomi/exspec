@@ -12,3 +12,6 @@ exspec-core.workspace = true
 tree-sitter = "0.24"
 tree-sitter-python = "0.23"
 streaming-iterator = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

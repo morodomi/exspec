@@ -591,6 +591,26 @@ impl PythonExtractor {
                 }
             }
 
+            // Layer 2 (absolute imports): resolve from scan_root
+            let abs_specifiers = self.extract_all_import_specifiers(source);
+            for (specifier, symbols) in &abs_specifiers {
+                let base = canonical_root.join(specifier);
+                if let Some(resolved) = exspec_core::observe::resolve_absolute_base_to_file(
+                    self,
+                    &base,
+                    &canonical_root,
+                ) {
+                    collect_import_matches(
+                        self,
+                        &resolved,
+                        symbols,
+                        &canonical_to_idx,
+                        &mut matched_indices,
+                        &canonical_root,
+                    );
+                }
+            }
+
             for idx in matched_indices {
                 if !mappings[idx].test_files.contains(test_file) {
                     mappings[idx].test_files.push(test_file.clone());
@@ -1187,5 +1207,268 @@ def endpoint():
                 mapping
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-ABS-01: `from models.cars import Car` -> mapped to models/cars.py via Layer 2
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_abs_01_absolute_import_nested_module() {
+        // Given: `from models.cars import Car` in tests/unit/test_car.py,
+        //        models/cars.py exists at scan_root
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        let tests_unit_dir = tmp.path().join("tests").join("unit");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::create_dir_all(&tests_unit_dir).unwrap();
+
+        let cars_py = models_dir.join("cars.py");
+        std::fs::write(&cars_py, "class Car:\n    pass\n").unwrap();
+
+        let test_car_py = tests_unit_dir.join("test_car.py");
+        let test_source = "from models.cars import Car\n\ndef test_car():\n    pass\n";
+        std::fs::write(&test_car_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = cars_py.to_string_lossy().into_owned();
+        let test_path = test_car_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: models/cars.py is mapped to test_car.py via Layer 2 (ImportTracing)
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "models/cars.py not found in mappings: {:?}",
+            result
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "test_car.py not in test_files for models/cars.py: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "expected ImportTracing strategy, got {:?}",
+            mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-ABS-02: `from utils.publish_state import ...` -> mapped to utils/publish_state.py
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_abs_02_absolute_import_utils_module() {
+        // Given: `from utils.publish_state import PublishState` in tests/test_pub.py,
+        //        utils/publish_state.py exists at scan_root
+        let tmp = tempfile::tempdir().unwrap();
+        let utils_dir = tmp.path().join("utils");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&utils_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        let publish_state_py = utils_dir.join("publish_state.py");
+        std::fs::write(&publish_state_py, "class PublishState:\n    pass\n").unwrap();
+
+        let test_pub_py = tests_dir.join("test_pub.py");
+        let test_source =
+            "from utils.publish_state import PublishState\n\ndef test_pub():\n    pass\n";
+        std::fs::write(&test_pub_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = publish_state_py.to_string_lossy().into_owned();
+        let test_path = test_pub_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: utils/publish_state.py is mapped to test_pub.py via Layer 2
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "utils/publish_state.py not found in mappings: {:?}",
+            result
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "test_pub.py not in test_files for utils/publish_state.py: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "expected ImportTracing strategy, got {:?}",
+            mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-ABS-03: relative import `from .models import X` -> resolves from from_file parent
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_abs_03_relative_import_still_resolves() {
+        // Given: `from .models import X` in tests/test_something.py,
+        //        tests/models.py exists relative to test file
+        let tmp = tempfile::tempdir().unwrap();
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        let models_py = tests_dir.join("models.py");
+        std::fs::write(&models_py, "class X:\n    pass\n").unwrap();
+
+        let test_py = tests_dir.join("test_something.py");
+        let test_source = "from .models import X\n\ndef test_x():\n    pass\n";
+        std::fs::write(&test_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = models_py.to_string_lossy().into_owned();
+        let test_path = test_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: models.py is mapped to test_something.py (relative import resolves from parent dir)
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "tests/models.py not found in mappings: {:?}",
+            result
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "test_something.py not in test_files for tests/models.py: {:?}",
+            mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-ABS-04: `from nonexistent.module import X` -> no mapping added (graceful skip)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_abs_04_nonexistent_absolute_import_skipped() {
+        // Given: `from nonexistent.module import X` in test file,
+        //        nonexistent/module.py does NOT exist at scan_root
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // A real production file to have something in production_files
+        let real_py = models_dir.join("real.py");
+        std::fs::write(&real_py, "class Real:\n    pass\n").unwrap();
+
+        let test_py = tests_dir.join("test_missing.py");
+        let test_source = "from nonexistent.module import X\n\ndef test_x():\n    pass\n";
+        std::fs::write(&test_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = real_py.to_string_lossy().into_owned();
+        let test_path = test_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: test_missing.py is NOT mapped to models/real.py (unresolvable import skipped)
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        if let Some(mapping) = mapping {
+            assert!(
+                !mapping.test_files.contains(&test_path),
+                "test_missing.py should NOT be mapped to models/real.py: {:?}",
+                mapping.test_files
+            );
+        }
+        // passing if no mapping or test_path not in mapping
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-ABS-05: mixed absolute + relative imports in same test file -> both resolved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_abs_05_mixed_absolute_and_relative_imports() {
+        // Given: a test file with both `from models.cars import Car` (absolute)
+        //        and `from .helpers import setup` (relative),
+        //        models/cars.py and tests/helpers.py both exist at scan_root
+        let tmp = tempfile::tempdir().unwrap();
+        let models_dir = tmp.path().join("models");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&models_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        let cars_py = models_dir.join("cars.py");
+        std::fs::write(&cars_py, "class Car:\n    pass\n").unwrap();
+
+        let helpers_py = tests_dir.join("helpers.py");
+        std::fs::write(&helpers_py, "def setup():\n    pass\n").unwrap();
+
+        let test_py = tests_dir.join("test_mixed.py");
+        let test_source =
+            "from models.cars import Car\nfrom .helpers import setup\n\ndef test_mixed():\n    pass\n";
+        std::fs::write(&test_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let cars_prod = cars_py.to_string_lossy().into_owned();
+        let helpers_prod = helpers_py.to_string_lossy().into_owned();
+        let test_path = test_py.to_string_lossy().into_owned();
+
+        let production_files = vec![cars_prod.clone(), helpers_prod.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: models/cars.py is mapped via absolute import (Layer 2)
+        let cars_mapping = result.iter().find(|m| m.production_file == cars_prod);
+        assert!(
+            cars_mapping.is_some(),
+            "models/cars.py not found in mappings: {:?}",
+            result
+        );
+        assert!(
+            cars_mapping.unwrap().test_files.contains(&test_path),
+            "test_mixed.py not mapped to models/cars.py via absolute import: {:?}",
+            cars_mapping.unwrap().test_files
+        );
+
+        // Then: tests/helpers.py is mapped via relative import (Layer 2)
+        let helpers_mapping = result.iter().find(|m| m.production_file == helpers_prod);
+        assert!(
+            helpers_mapping.is_some(),
+            "tests/helpers.py not found in mappings: {:?}",
+            result
+        );
+        assert!(
+            helpers_mapping.unwrap().test_files.contains(&test_path),
+            "test_mixed.py not mapped to tests/helpers.py via relative import: {:?}",
+            helpers_mapping.unwrap().test_files
+        );
     }
 }
