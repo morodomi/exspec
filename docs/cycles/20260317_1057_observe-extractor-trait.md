@@ -1,7 +1,7 @@
 ---
 feature: "Phase 9a — ObserveExtractor trait extraction"
 cycle: "20260317_1057"
-phase: RED
+phase: DONE
 complexity: standard
 test_count: 7
 risk_level: medium
@@ -74,34 +74,7 @@ updated: 2026-03-17 10:57
 ## Test List
 
 ### TODO
-- [ ] TC-01: MockExtractor で `map_test_files` の Layer 1 stem matching が動作
-  - Given: core/observe.rs に MockExtractor
-  - When: `map_test_files(mock, ...)`
-  - Then: stem matching でテストファイルがプロダクションファイルにマッピングされる
-- [ ] TC-02: MockExtractor で `resolve_import_path` が mock の source_extensions でプローブ
-  - Given: core/observe.rs に MockExtractor
-  - When: `resolve_import_path(mock, ...)`
-  - Then: mock の source_extensions で拡張子をプローブして解決
-- [ ] TC-03: MockExtractor で `is_barrel_file` が mock の index_file_names で判定
-  - Given: core/observe.rs に MockExtractor
-  - When: `is_barrel_file(mock, path)`
-  - Then: mock の index_file_names に含まれるファイル名で判定
-- [ ] TC-04: 既存 TypeScript observe テスト全件が thin wrapper 経由でパス
-  - Given: TypeScriptExtractor が ObserveExtractor を impl
-  - When: `cargo test -p exspec-lang-typescript`
-  - Then: 全件 PASS (テスト側変更なし)
-- [ ] TC-05: CLI テストが trait-based dispatch でパス
-  - Given: trait-based CLI dispatch
-  - When: `cargo test -p exspec`
-  - Then: CLI テスト通過
-- [ ] TC-06: `cargo clippy -- -D warnings` で 0 errors
-  - Given: 全変更適用後
-  - When: `cargo clippy -- -D warnings`
-  - Then: 0 errors
-- [ ] TC-07: self-dogfooding — `cargo run -- --lang rust .` で BLOCK 0件
-  - Given: リファクタリング完了後の exspec 自身
-  - When: `cargo run -- --lang rust .`
-  - Then: BLOCK 0件
+(none)
 
 ### WIP
 (none)
@@ -110,7 +83,34 @@ updated: 2026-03-17 10:57
 (none)
 
 ### DONE
-(none)
+- [x] TC-01: MockExtractor で `map_test_files` の Layer 1 stem matching が動作
+  - Given: core/observe.rs に MockExtractor
+  - When: `map_test_files(mock, ...)`
+  - Then: stem matching でテストファイルがプロダクションファイルにマッピングされる
+- [x] TC-02: MockExtractor で `resolve_import_path` が mock の source_extensions でプローブ
+  - Given: core/observe.rs に MockExtractor
+  - When: `resolve_import_path(mock, ...)`
+  - Then: mock の source_extensions で拡張子をプローブして解決
+- [x] TC-03: MockExtractor で `is_barrel_file` が mock の index_file_names で判定
+  - Given: core/observe.rs に MockExtractor
+  - When: `is_barrel_file(mock, path)`
+  - Then: mock の index_file_names に含まれるファイル名で判定
+- [x] TC-04: 既存 TypeScript observe テスト全件が thin wrapper 経由でパス
+  - Given: TypeScriptExtractor が ObserveExtractor を impl
+  - When: `cargo test -p exspec-lang-typescript`
+  - Then: 全件 PASS (テスト側変更なし)
+- [x] TC-05: CLI テストが trait-based dispatch でパス
+  - Given: trait-based CLI dispatch
+  - When: `cargo test -p exspec`
+  - Then: CLI テスト通過
+- [x] TC-06: `cargo clippy -- -D warnings` で 0 errors
+  - Given: 全変更適用後
+  - When: `cargo clippy -- -D warnings`
+  - Then: 0 errors
+- [x] TC-07: self-dogfooding — `cargo run -- --lang rust .` で BLOCK 0件
+  - Given: リファクタリング完了後の exspec 自身
+  - When: `cargo run -- --lang rust .`
+  - Then: BLOCK 0件
 
 ## Implementation Notes
 
@@ -180,14 +180,37 @@ CLI dispatch (crates/cli/src/main.rs)
 - Plan: Phase 9a ObserveExtractor trait extraction
 - Scope: core/observe.rs (new) + core/lib.rs + lang-typescript/observe.rs + cli/main.rs
 
+### 2026-03-17 - plan-review
+- design-reviewer PASS (score 35)
+- resolve_barrel_exports_inner の具象型参照、file_exports_any_symbol 配置、tsconfig alias 解決の3点を確認
+
+### 2026-03-17 - RED
+- TC-01〜TC-06 作成、TC-01/TC-01b が todo! で失敗確認
+
+### 2026-03-17 - GREEN
+- core/observe.rs: trait + types + free functions 完成
+- lang-typescript: impl ObserveExtractor, thin wrappers
+- CLI: MappingStrategy import 更新
+- 全839テスト PASS
+
+### 2026-03-17 - REFACTOR
+- resolve_absolute_base_to_file 重複を core 委譲に統一
+
+### 2026-03-17 - REVIEW
+- correctness-reviewer PASS (score 35)
+
+### 2026-03-17 - COMMIT
+- feat/observe-extractor-trait ブランチ (9f1e9fb)
+- 5 files changed, 689 insertions, 279 deletions
+
 ---
 
 ## Next Steps
 
-1. [Done] INIT <- Current
-2. [Next] plan-review (design-reviewer による trait 公開 API 設計レビュー)
-3. [ ] RED
-4. [ ] GREEN
-5. [ ] REFACTOR
-6. [ ] REVIEW
-7. [ ] COMMIT
+1. [Done] INIT
+2. [Done] plan-review
+3. [Done] RED
+4. [Done] GREEN
+5. [Done] REFACTOR
+6. [Done] REVIEW
+7. [Done] COMMIT
