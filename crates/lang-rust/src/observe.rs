@@ -267,26 +267,7 @@ impl ObserveExtractor for RustExtractor {
     }
 
     fn extract_all_import_specifiers(&self, source: &str) -> Vec<(String, Vec<String>)> {
-        let mut parser = Self::parser();
-        let tree = match parser.parse(source, None) {
-            Some(t) => t,
-            None => return Vec::new(),
-        };
-        let source_bytes = source.as_bytes();
-
-        // Manual tree walking for Rust use statements, more reliable than queries
-        // for complex use trees
-        let root = tree.root_node();
-        let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
-
-        for i in 0..root.child_count() {
-            let child = root.child(i).unwrap();
-            if child.kind() == "use_declaration" {
-                extract_use_declaration(&child, source_bytes, &mut result_map);
-            }
-        }
-
-        result_map.into_iter().collect()
+        extract_import_specifiers_with_crate_name(source, None)
     }
 
     fn extract_barrel_re_exports(&self, source: &str, file_path: &str) -> Vec<BarrelReExport> {
@@ -432,11 +413,13 @@ fn find_cfg_test_ranges(source: &str) -> Vec<(usize, usize)> {
 }
 
 /// Extract use declarations from a `use_declaration` node.
-/// Only processes `use crate::...` imports, skipping external crates and std.
+/// Processes `use crate::...` imports and, if `crate_name` is provided,
+/// also `use {crate_name}::...` imports (for integration tests).
 fn extract_use_declaration(
     node: &tree_sitter::Node,
     source_bytes: &[u8],
     result: &mut HashMap<String, Vec<String>>,
+    crate_name: Option<&str>,
 ) {
     let arg = match node.child_by_field_name("argument") {
         Some(a) => a,
@@ -444,14 +427,99 @@ fn extract_use_declaration(
     };
     let full_text = arg.utf8_text(source_bytes).unwrap_or("");
 
-    // Only handle crate-local imports
-    if !full_text.starts_with("crate::") {
+    // Handle `crate::` prefix
+    if let Some(path_after_crate) = full_text.strip_prefix("crate::") {
+        parse_use_path(path_after_crate, result);
         return;
     }
 
-    // Strip the `crate::` prefix and parse
-    let path_after_crate = &full_text["crate::".len()..];
-    parse_use_path(path_after_crate, result);
+    // Handle `{crate_name}::` prefix for integration tests
+    if let Some(name) = crate_name {
+        let prefix = format!("{name}::");
+        if let Some(path_after_name) = full_text.strip_prefix(&prefix) {
+            parse_use_path(path_after_name, result);
+        }
+    }
+}
+
+/// Extract import specifiers with optional crate name support.
+/// When `crate_name` is `Some`, also resolves `use {crate_name}::...` imports
+/// in addition to the standard `use crate::...` imports.
+pub fn extract_import_specifiers_with_crate_name(
+    source: &str,
+    crate_name: Option<&str>,
+) -> Vec<(String, Vec<String>)> {
+    let mut parser = RustExtractor::parser();
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let source_bytes = source.as_bytes();
+
+    // Manual tree walking for Rust use statements, more reliable than queries
+    // for complex use trees
+    let root = tree.root_node();
+    let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    for i in 0..root.child_count() {
+        let child = root.child(i).unwrap();
+        if child.kind() == "use_declaration" {
+            extract_use_declaration(&child, source_bytes, &mut result_map, crate_name);
+        }
+    }
+
+    result_map.into_iter().collect()
+}
+
+/// Parse the `name = "..."` field from a Cargo.toml `[package]` section.
+/// Hyphens in the name are converted to underscores.
+/// Returns `None` if the file cannot be read or `[package]` section is absent.
+pub fn parse_crate_name(scan_root: &Path) -> Option<String> {
+    let cargo_toml = scan_root.join("Cargo.toml");
+    let content = std::fs::read_to_string(&cargo_toml).ok()?;
+
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Detect section headers
+        if trimmed.starts_with('[') {
+            if trimmed == "[package]" {
+                in_package = true;
+            } else {
+                // Once we hit another section, stop looking
+                if in_package {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        if in_package {
+            // Parse `name = "..."` or `name = '...'`
+            if let Some(rest) = trimmed.strip_prefix("name") {
+                let rest = rest.trim();
+                if let Some(rest) = rest.strip_prefix('=') {
+                    let rest = rest.trim();
+                    // Strip surrounding quotes
+                    let name = if let Some(inner) =
+                        rest.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+                    {
+                        inner
+                    } else if let Some(inner) =
+                        rest.strip_prefix('\'').and_then(|s| s.strip_suffix('\''))
+                    {
+                        inner
+                    } else {
+                        continue;
+                    };
+                    return Some(name.replace('-', "_"));
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Parse a use path after `crate::` has been stripped.
@@ -603,9 +671,12 @@ impl RustExtractor {
             .map(|m| m.test_files.iter().cloned().collect())
             .collect();
 
+        // Resolve crate name for integration test import matching
+        let crate_name = parse_crate_name(scan_root);
+
         // Layer 2: import tracing
         for (test_file, source) in test_sources {
-            let imports = self.extract_all_import_specifiers(source);
+            let imports = extract_import_specifiers_with_crate_name(source, crate_name.as_deref());
             let mut matched_indices = HashSet::<usize>::new();
 
             for (specifier, symbols) in &imports {
@@ -1284,5 +1355,237 @@ mod tests {
                 mapping
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-CRATE-01: parse_crate_name: 正常パース
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_crate_01_parse_crate_name_hyphen() {
+        // Given: Cargo.toml に [package]\nname = "my-crate" を含む tempdir
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // When: parse_crate_name(dir) を呼ぶ
+        let result = parse_crate_name(tmp.path());
+
+        // Then: Some("my_crate") を返す（ハイフン→アンダースコア変換）
+        assert_eq!(result, Some("my_crate".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-CRATE-02: parse_crate_name: ハイフンなし
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_crate_02_parse_crate_name_no_hyphen() {
+        // Given: Cargo.toml に name = "tokio" を含む tempdir
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"tokio\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+
+        // When: parse_crate_name(dir)
+        let result = parse_crate_name(tmp.path());
+
+        // Then: Some("tokio")
+        assert_eq!(result, Some("tokio".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-CRATE-03: parse_crate_name: ファイルなし
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_crate_03_parse_crate_name_no_file() {
+        // Given: Cargo.toml が存在しない tempdir
+        let tmp = tempfile::tempdir().unwrap();
+
+        // When: parse_crate_name(dir)
+        let result = parse_crate_name(tmp.path());
+
+        // Then: None
+        assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-CRATE-04: parse_crate_name: workspace (package なし)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_crate_04_parse_crate_name_workspace() {
+        // Given: [workspace]\nmembers = ["crate1"] のみの Cargo.toml
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crate1\"]\n",
+        )
+        .unwrap();
+
+        // When: parse_crate_name(dir)
+        let result = parse_crate_name(tmp.path());
+
+        // Then: None
+        assert_eq!(result, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-05: crate_name simple import
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_05_crate_name_simple_import() {
+        // Given: source = "use my_crate::user::User;\n", crate_name = Some("my_crate")
+        let source = "use my_crate::user::User;\n";
+
+        // When: extract_import_specifiers_with_crate_name(source, Some("my_crate"))
+        let result = extract_import_specifiers_with_crate_name(source, Some("my_crate"));
+
+        // Then: [("user", ["User"])]
+        let entry = result.iter().find(|(spec, _)| spec == "user");
+        assert!(entry.is_some(), "user not found in {:?}", result);
+        let (_, symbols) = entry.unwrap();
+        assert!(
+            symbols.contains(&"User".to_string()),
+            "User not in {:?}",
+            symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-06: crate_name use list
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_06_crate_name_use_list() {
+        // Given: source = "use my_crate::user::{User, Admin};\n", crate_name = Some("my_crate")
+        let source = "use my_crate::user::{User, Admin};\n";
+
+        // When: extract_import_specifiers_with_crate_name(source, Some("my_crate"))
+        let result = extract_import_specifiers_with_crate_name(source, Some("my_crate"));
+
+        // Then: [("user", ["User", "Admin"])]
+        let entry = result.iter().find(|(spec, _)| spec == "user");
+        assert!(entry.is_some(), "user not found in {:?}", result);
+        let (_, symbols) = entry.unwrap();
+        assert!(
+            symbols.contains(&"User".to_string()),
+            "User not in {:?}",
+            symbols
+        );
+        assert!(
+            symbols.contains(&"Admin".to_string()),
+            "Admin not in {:?}",
+            symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-07: crate_name=None ではスキップ
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_07_crate_name_none_skips() {
+        // Given: source = "use my_crate::user::User;\n", crate_name = None
+        let source = "use my_crate::user::User;\n";
+
+        // When: extract_import_specifiers_with_crate_name(source, None)
+        let result = extract_import_specifiers_with_crate_name(source, None);
+
+        // Then: [] (空)
+        assert!(
+            result.is_empty(),
+            "Expected empty result when crate_name=None, got: {:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-08: crate:: と crate_name:: 混在
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_08_mixed_crate_and_crate_name() {
+        // Given: source に `use crate::service::Service;` と `use my_crate::user::User;` の両方
+        // crate_name = Some("my_crate")
+        let source = "use crate::service::Service;\nuse my_crate::user::User;\n";
+
+        // When: extract_import_specifiers_with_crate_name(source, Some("my_crate"))
+        let result = extract_import_specifiers_with_crate_name(source, Some("my_crate"));
+
+        // Then: [("service", ["Service"]), ("user", ["User"])] の両方が検出される
+        let service_entry = result.iter().find(|(spec, _)| spec == "service");
+        assert!(service_entry.is_some(), "service not found in {:?}", result);
+        let (_, service_symbols) = service_entry.unwrap();
+        assert!(
+            service_symbols.contains(&"Service".to_string()),
+            "Service not in {:?}",
+            service_symbols
+        );
+
+        let user_entry = result.iter().find(|(spec, _)| spec == "user");
+        assert!(user_entry.is_some(), "user not found in {:?}", result);
+        let (_, user_symbols) = user_entry.unwrap();
+        assert!(
+            user_symbols.contains(&"User".to_string()),
+            "User not in {:?}",
+            user_symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L2-INTEG: 統合テスト (tempdir)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l2_integ_crate_name_import_layer2() {
+        // Given: tempdir に以下を作成
+        //   - Cargo.toml: [package]\nname = "my-crate"\nversion = "0.1.0"\nedition = "2021"
+        //   - src/user.rs: pub struct User;
+        //   - tests/test_user.rs: use my_crate::user::User; (ソース)
+        let tmp = tempfile::tempdir().unwrap();
+        let src_dir = tmp.path().join("src");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let user_rs = src_dir.join("user.rs");
+        std::fs::write(&user_rs, "pub struct User;\n").unwrap();
+
+        let test_user_rs = tests_dir.join("test_user.rs");
+        let test_source = "use my_crate::user::User;\n\n#[test]\nfn test_user() {}\n";
+        std::fs::write(&test_user_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let prod_path = user_rs.to_string_lossy().into_owned();
+        let test_path = test_user_rs.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports を呼ぶ
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: test_user.rs → user.rs が Layer 2 (ImportTracing) でマッチ
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(mapping.is_some(), "production file mapping not found");
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_user.rs to map to user.rs via Layer 2, got: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "Expected ImportTracing strategy, got: {:?}",
+            mapping.strategy
+        );
     }
 }
