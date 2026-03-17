@@ -167,11 +167,32 @@ const EXTERNAL_NAMESPACES: &[&str] = &[
     "SebastianBergmann",
 ];
 
-fn is_external_namespace(namespace: &str) -> bool {
+fn is_external_namespace(namespace: &str, scan_root: Option<&Path>) -> bool {
     let first_segment = namespace.split('/').next().unwrap_or("");
-    EXTERNAL_NAMESPACES
+    let is_known_external = EXTERNAL_NAMESPACES
         .iter()
-        .any(|&ext| first_segment.eq_ignore_ascii_case(ext))
+        .any(|&ext| first_segment.eq_ignore_ascii_case(ext));
+
+    if !is_known_external {
+        return false;
+    }
+
+    // If scan_root is provided, check if the namespace source exists locally.
+    // If it does, this is a framework self-test scenario — treat as internal.
+    if let Some(root) = scan_root {
+        for prefix in &["src", "app", "lib", ""] {
+            let candidate = if prefix.is_empty() {
+                root.join(first_segment)
+            } else {
+                root.join(prefix).join(first_segment)
+            };
+            if candidate.is_dir() {
+                return false;
+            }
+        }
+    }
+
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -283,8 +304,8 @@ impl ObserveExtractor for PhpExtractor {
                 // Convert `App\Models\User` -> `App/Models/User`
                 let fs_path = raw.replace('\\', "/");
 
-                // Skip external packages
-                if is_external_namespace(&fs_path) {
+                // Skip external packages (no scan_root — trait method, conservative filter)
+                if is_external_namespace(&fs_path, None) {
                     continue;
                 }
 
@@ -347,6 +368,53 @@ impl ObserveExtractor for PhpExtractor {
 // ---------------------------------------------------------------------------
 
 impl PhpExtractor {
+    /// Extract all import specifiers without external namespace filtering.
+    /// Returns (module_path, [symbols]) pairs for all `use` statements.
+    fn extract_raw_import_specifiers(source: &str) -> Vec<(String, Vec<String>)> {
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+        let query = cached_query(&IMPORT_MAPPING_QUERY_CACHE, IMPORT_MAPPING_QUERY);
+
+        let namespace_path_idx = query.capture_index_for_name("namespace_path");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+
+        let mut result_map: HashMap<String, Vec<String>> = HashMap::new();
+
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if namespace_path_idx != Some(cap.index) {
+                    continue;
+                }
+                let raw = cap.node.utf8_text(source_bytes).unwrap_or("");
+                let fs_path = raw.replace('\\', "/");
+
+                let parts: Vec<&str> = fs_path.splitn(2, '/').collect();
+                if parts.len() < 2 {
+                    continue;
+                }
+
+                if let Some(last_slash) = fs_path.rfind('/') {
+                    let module_path = &fs_path[..last_slash];
+                    let symbol = &fs_path[last_slash + 1..];
+                    if !module_path.is_empty() && !symbol.is_empty() {
+                        result_map
+                            .entry(module_path.to_string())
+                            .or_default()
+                            .push(symbol.to_string());
+                    }
+                }
+            }
+        }
+
+        result_map.into_iter().collect()
+    }
+
     /// Layer 1 + Layer 2 (PSR-4): Map test files to production files.
     pub fn map_test_files_with_imports(
         &self,
@@ -379,9 +447,13 @@ impl PhpExtractor {
             .collect();
 
         // Layer 2: PSR-4 convention import resolution
+        // Use raw imports (unfiltered) and apply scan_root-aware external filtering
         for (test_file, source) in test_sources {
-            let specifiers =
-                <Self as ObserveExtractor>::extract_all_import_specifiers(self, source);
+            let raw_specifiers = Self::extract_raw_import_specifiers(source);
+            let specifiers: Vec<(String, Vec<String>)> = raw_specifiers
+                .into_iter()
+                .filter(|(module_path, _)| !is_external_namespace(module_path, Some(scan_root)))
+                .collect();
             let mut matched_indices = std::collections::HashSet::<usize>::new();
 
             for (module_path, _symbols) in &specifiers {
@@ -429,11 +501,21 @@ impl PhpExtractor {
                     }
 
                     // Also try with the first segment kept (in case directory matches namespace 1:1)
-                    let file_with_prefix = canonical_root.join(module_path).join(&file_name);
-                    if let Ok(canonical_candidate) = file_with_prefix.canonicalize() {
-                        let candidate_str = canonical_candidate.to_string_lossy().into_owned();
-                        if let Some(&idx) = canonical_to_idx.get(&candidate_str) {
-                            matched_indices.insert(idx);
+                    // e.g., framework self-tests: `Illuminate/Http` -> `src/Illuminate/Http/Request.php`
+                    for prefix in &common_prefixes {
+                        let candidate = if prefix.is_empty() {
+                            canonical_root.join(module_path).join(&file_name)
+                        } else {
+                            canonical_root
+                                .join(prefix)
+                                .join(module_path)
+                                .join(&file_name)
+                        };
+                        if let Ok(canonical_candidate) = candidate.canonicalize() {
+                            let candidate_str = canonical_candidate.to_string_lossy().into_owned();
+                            if let Some(&idx) = canonical_to_idx.get(&candidate_str) {
+                                matched_indices.insert(idx);
+                            }
                         }
                     }
                 }
@@ -886,6 +968,213 @@ mod tests {
                 "TestCase.php should not be mapped as a test file for User.php"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FW-01: laravel/framework layout -> Illuminate import resolves locally
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_fw_01_laravel_framework_self_test() {
+        // Given: laravel/framework layout with src/Illuminate/Http/Request.php
+        //        and tests/Http/RequestTest.php importing `use Illuminate\Http\Request`
+        // When: map_test_files_with_imports is called
+        // Then: RequestTest.php is mapped to Request.php via Layer 2
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let src_dir = dir.path().join("src").join("Illuminate").join("Http");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let test_dir = dir.path().join("tests").join("Http");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = src_dir.join("Request.php");
+        std::fs::write(
+            &prod_file,
+            "<?php\nnamespace Illuminate\\Http;\nclass Request {}",
+        )
+        .unwrap();
+
+        let test_file = test_dir.join("RequestTest.php");
+        let test_source =
+            "<?php\nuse Illuminate\\Http\\Request;\nclass RequestTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        let request_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("Request.php"))
+            .expect("expected Request.php in mappings");
+        assert!(
+            request_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("RequestTest.php")),
+            "expected RequestTest.php to be mapped to Request.php via Layer 2, got: {:?}",
+            request_mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FW-02: normal app -> Illuminate import still filtered (no local source)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_fw_02_normal_app_illuminate_filtered() {
+        // Given: normal app layout with app/Models/User.php
+        //        and tests/UserTest.php importing `use Illuminate\Http\Request`
+        //        (no local Illuminate directory)
+        // When: map_test_files_with_imports is called
+        // Then: Illuminate import is NOT resolved (no mapping via import)
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let app_dir = dir.path().join("app").join("Models");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = app_dir.join("User.php");
+        std::fs::write(&prod_file, "<?php\nclass User {}").unwrap();
+
+        // This test imports Illuminate but there's no local Illuminate source
+        let test_file = test_dir.join("OrderTest.php");
+        let test_source =
+            "<?php\nuse Illuminate\\Http\\Request;\nclass OrderTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // User.php should not have OrderTest.php mapped (no stem match, no import match)
+        let user_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("User.php"))
+            .expect("expected User.php in mappings");
+        assert!(
+            !user_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("OrderTest.php")),
+            "Illuminate import should be filtered when no local source exists"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FW-03: PHPUnit import still filtered via integration test (regression)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_fw_03_phpunit_still_external() {
+        // Given: app with src/Calculator.php and tests/CalculatorTest.php
+        //        importing only `use PHPUnit\Framework\TestCase` (no local PHPUnit source)
+        // When: map_test_files_with_imports is called
+        // Then: PHPUnit import does not create a false mapping
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let src_dir = dir.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = src_dir.join("Calculator.php");
+        std::fs::write(&prod_file, "<?php\nclass Calculator {}").unwrap();
+
+        // Test imports only PHPUnit (external) — no import-based mapping should occur
+        let test_file = test_dir.join("OtherTest.php");
+        let test_source =
+            "<?php\nuse PHPUnit\\Framework\\TestCase;\nclass OtherTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        let calc_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("Calculator.php"))
+            .expect("expected Calculator.php in mappings");
+        assert!(
+            !calc_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("OtherTest.php")),
+            "PHPUnit import should not create a mapping to Calculator.php"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-FW-04: symfony/symfony layout -> Symfony import resolves locally
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_fw_04_symfony_self_test() {
+        // Given: symfony layout with src/Symfony/Component/HttpFoundation/Request.php
+        //        and tests/HttpFoundation/RequestTest.php importing
+        //        `use Symfony\Component\HttpFoundation\Request`
+        // When: map_test_files_with_imports is called
+        // Then: RequestTest.php is mapped to Request.php via Layer 2
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let src_dir = dir
+            .path()
+            .join("src")
+            .join("Symfony")
+            .join("Component")
+            .join("HttpFoundation");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let test_dir = dir.path().join("tests").join("HttpFoundation");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = src_dir.join("Request.php");
+        std::fs::write(
+            &prod_file,
+            "<?php\nnamespace Symfony\\Component\\HttpFoundation;\nclass Request {}",
+        )
+        .unwrap();
+
+        let test_file = test_dir.join("RequestTest.php");
+        let test_source = "<?php\nuse Symfony\\Component\\HttpFoundation\\Request;\nclass RequestTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        let request_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("Request.php"))
+            .expect("expected Request.php in mappings");
+        assert!(
+            request_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("RequestTest.php")),
+            "expected RequestTest.php to be mapped to Request.php via Layer 2, got: {:?}",
+            request_mapping.test_files
+        );
     }
 
     // -----------------------------------------------------------------------
