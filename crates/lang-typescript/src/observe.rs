@@ -7,6 +7,12 @@ use tree_sitter::{Node, Query, QueryCursor};
 
 use super::{cached_query, TypeScriptExtractor};
 
+// Re-export core types for backward compatibility
+pub use exspec_core::observe::{
+    BarrelReExport, FileMapping, ImportMapping, MappingStrategy, ObserveExtractor,
+    ProductionFunction,
+};
+
 const PRODUCTION_FUNCTION_QUERY: &str = include_str!("../queries/production_function.scm");
 static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
@@ -18,19 +24,6 @@ static RE_EXPORT_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
 const EXPORTED_SYMBOL_QUERY: &str = include_str!("../queries/exported_symbol.scm");
 static EXPORTED_SYMBOL_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
-
-/// Maximum depth for barrel re-export resolution (NestJS measured max 2 hops).
-const MAX_BARREL_DEPTH: usize = 3;
-
-/// A production (non-test) function or method extracted from source code.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ProductionFunction {
-    pub name: String,
-    pub file: String,
-    pub line: usize,
-    pub class_name: Option<String>,
-    pub is_exported: bool,
-}
 
 /// A route extracted from a NestJS controller.
 #[derive(Debug, Clone, PartialEq)]
@@ -52,42 +45,6 @@ pub struct DecoratorInfo {
     pub class_name: String,
     pub file: String,
     pub line: usize,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct FileMapping {
-    pub production_file: String,
-    pub test_files: Vec<String>,
-    pub strategy: MappingStrategy,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum MappingStrategy {
-    FileNameConvention,
-    ImportTracing,
-}
-
-/// An import statement extracted from a TypeScript source file.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ImportMapping {
-    pub symbol_name: String,
-    pub module_specifier: String,
-    pub file: String,
-    pub line: usize,
-    /// All symbol names imported from this module specifier (same-statement grouping).
-    /// For `import { Foo, Bar } from './module'`, both Foo and Bar appear here.
-    pub symbols: Vec<String>,
-}
-
-/// A re-export statement extracted from a barrel (index.ts) file.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BarrelReExport {
-    /// Named symbols re-exported (empty for wildcard).
-    pub symbols: Vec<String>,
-    /// The module specifier of the re-export source.
-    pub from_specifier: String,
-    /// True if this is a wildcard re-export (`export * from '...'`).
-    pub wildcard: bool,
 }
 
 /// HTTP method decorators recognized as route indicators.
@@ -117,49 +74,60 @@ const GAP_RELEVANT_DECORATORS: &[&str] = &[
     "IsUUID",
 ];
 
+impl ObserveExtractor for TypeScriptExtractor {
+    fn extract_production_functions(
+        &self,
+        source: &str,
+        file_path: &str,
+    ) -> Vec<ProductionFunction> {
+        self.extract_production_functions_impl(source, file_path)
+    }
+
+    fn extract_imports(&self, source: &str, file_path: &str) -> Vec<ImportMapping> {
+        self.extract_imports_impl(source, file_path)
+    }
+
+    fn extract_all_import_specifiers(&self, source: &str) -> Vec<(String, Vec<String>)> {
+        self.extract_all_import_specifiers_impl(source)
+    }
+
+    fn extract_barrel_re_exports(&self, source: &str, file_path: &str) -> Vec<BarrelReExport> {
+        self.extract_barrel_re_exports_impl(source, file_path)
+    }
+
+    fn source_extensions(&self) -> &[&str] {
+        &["ts", "tsx", "js", "jsx"]
+    }
+
+    fn index_file_names(&self) -> &[&str] {
+        &["index.ts", "index.tsx"]
+    }
+
+    fn production_stem<'a>(&self, path: &'a str) -> Option<&'a str> {
+        production_stem(path)
+    }
+
+    fn test_stem<'a>(&self, path: &'a str) -> Option<&'a str> {
+        test_stem(path)
+    }
+
+    fn is_non_sut_helper(&self, file_path: &str, is_known_production: bool) -> bool {
+        is_non_sut_helper(file_path, is_known_production)
+    }
+
+    fn file_exports_any_symbol(&self, file_path: &Path, symbols: &[String]) -> bool {
+        file_exports_any_symbol(file_path, symbols)
+    }
+}
+
 impl TypeScriptExtractor {
+    /// Layer 1: Map test files to production files by filename convention.
     pub fn map_test_files(
         &self,
         production_files: &[String],
         test_files: &[String],
     ) -> Vec<FileMapping> {
-        let mut tests_by_key: HashMap<(String, String), Vec<String>> = HashMap::new();
-
-        for test_file in test_files {
-            let Some(stem) = test_stem(test_file) else {
-                continue;
-            };
-            let directory = Path::new(test_file)
-                .parent()
-                .map(|parent| parent.to_string_lossy().into_owned())
-                .unwrap_or_default();
-
-            tests_by_key
-                .entry((directory, stem.to_string()))
-                .or_default()
-                .push(test_file.clone());
-        }
-
-        production_files
-            .iter()
-            .map(|production_file| {
-                let test_matches = production_stem(production_file)
-                    .and_then(|stem| {
-                        let directory = Path::new(production_file)
-                            .parent()
-                            .map(|parent| parent.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        tests_by_key.get(&(directory, stem.to_string())).cloned()
-                    })
-                    .unwrap_or_default();
-
-                FileMapping {
-                    production_file: production_file.clone(),
-                    test_files: test_matches,
-                    strategy: MappingStrategy::FileNameConvention,
-                }
-            })
-            .collect()
+        exspec_core::observe::map_test_files(self, production_files, test_files)
     }
 
     /// Extract NestJS routes from a controller source file.
@@ -340,8 +308,7 @@ impl TypeScriptExtractor {
         decorators
     }
 
-    /// Extract all production functions/methods from TypeScript source code.
-    pub fn extract_production_functions(
+    fn extract_production_functions_impl(
         &self,
         source: &str,
         file_path: &str,
@@ -672,10 +639,8 @@ fn is_type_only_import(symbol_node: Node) -> bool {
     false
 }
 
-/// Extract import statements from TypeScript source.
-/// Returns only relative imports (starting with "." or ".."); npm packages are excluded.
 impl TypeScriptExtractor {
-    pub fn extract_imports(&self, source: &str, file_path: &str) -> Vec<ImportMapping> {
+    fn extract_imports_impl(&self, source: &str, file_path: &str) -> Vec<ImportMapping> {
         let mut parser = Self::parser();
         let tree = match parser.parse(source, None) {
             Some(t) => t,
@@ -746,10 +711,7 @@ impl TypeScriptExtractor {
         result
     }
 
-    /// Extract all import specifiers from TypeScript source (including non-relative).
-    /// Used for tsconfig alias resolution. Does NOT filter by relative-only.
-    /// Returns deduplicated (specifier, symbols) pairs.
-    pub fn extract_all_import_specifiers(&self, source: &str) -> Vec<(String, Vec<String>)> {
+    fn extract_all_import_specifiers_impl(&self, source: &str) -> Vec<(String, Vec<String>)> {
         let mut parser = Self::parser();
         let tree = match parser.parse(source, None) {
             Some(t) => t,
@@ -799,8 +761,11 @@ impl TypeScriptExtractor {
         specifier_symbols.into_iter().collect()
     }
 
-    /// Extract barrel re-export statements (`export { X } from '...'` / `export * from '...'`).
-    pub fn extract_barrel_re_exports(&self, source: &str, _file_path: &str) -> Vec<BarrelReExport> {
+    fn extract_barrel_re_exports_impl(
+        &self,
+        source: &str,
+        _file_path: &str,
+    ) -> Vec<BarrelReExport> {
         let mut parser = Self::parser();
         let tree = match parser.parse(source, None) {
             Some(t) => t,
@@ -916,7 +881,7 @@ impl TypeScriptExtractor {
         // Layer 2: import tracing for all test files (Layer 1 matched tests may
         // also import other production files not matched by filename convention)
         for (test_file, source) in test_sources {
-            let imports = self.extract_imports(source, test_file);
+            let imports = <Self as ObserveExtractor>::extract_imports(self, source, test_file);
             let from_file = Path::new(test_file);
             let mut matched_indices = std::collections::HashSet::new();
 
@@ -925,19 +890,26 @@ impl TypeScriptExtractor {
             let collect_matches = |resolved: &str,
                                    symbols: &[String],
                                    indices: &mut HashSet<usize>| {
-                if is_barrel_file(resolved) {
+                if self.is_barrel_file(resolved) {
                     let barrel_path = PathBuf::from(resolved);
-                    let resolved_files =
-                        resolve_barrel_exports(&barrel_path, symbols, &canonical_root);
+                    let resolved_files = exspec_core::observe::resolve_barrel_exports(
+                        self,
+                        &barrel_path,
+                        symbols,
+                        &canonical_root,
+                    );
                     for prod in resolved_files {
                         let prod_str = prod.to_string_lossy().into_owned();
-                        if !is_non_sut_helper(&prod_str, canonical_to_idx.contains_key(&prod_str)) {
+                        if !self
+                            .is_non_sut_helper(&prod_str, canonical_to_idx.contains_key(&prod_str))
+                        {
                             if let Some(&idx) = canonical_to_idx.get(&prod_str) {
                                 indices.insert(idx);
                             }
                         }
                     }
-                } else if !is_non_sut_helper(resolved, canonical_to_idx.contains_key(resolved)) {
+                } else if !self.is_non_sut_helper(resolved, canonical_to_idx.contains_key(resolved))
+                {
                     if let Some(&idx) = canonical_to_idx.get(resolved) {
                         indices.insert(idx);
                     }
@@ -945,22 +917,26 @@ impl TypeScriptExtractor {
             };
 
             for import in &imports {
-                if let Some(resolved) =
-                    resolve_import_path(&import.module_specifier, from_file, &canonical_root)
-                {
+                if let Some(resolved) = exspec_core::observe::resolve_import_path(
+                    self,
+                    &import.module_specifier,
+                    from_file,
+                    &canonical_root,
+                ) {
                     collect_matches(&resolved, &import.symbols, &mut matched_indices);
                 }
             }
 
             // Layer 2b: tsconfig alias resolution
             if let Some(ref tc_paths) = tsconfig_paths {
-                let alias_imports = self.extract_all_import_specifiers(source);
+                let alias_imports =
+                    <Self as ObserveExtractor>::extract_all_import_specifiers(self, source);
                 for (specifier, symbols) in &alias_imports {
                     let Some(alias_base) = tc_paths.resolve_alias(specifier) else {
                         continue;
                     };
                     if let Some(resolved) =
-                        resolve_absolute_base_to_file(&alias_base, &canonical_root)
+                        resolve_absolute_base_to_file(self, &alias_base, &canonical_root)
                     {
                         collect_matches(&resolved, symbols, &mut matched_indices);
                     }
@@ -992,76 +968,23 @@ impl TypeScriptExtractor {
 }
 
 /// Resolve a module specifier to an absolute file path.
-/// Returns None if the file does not exist or is outside scan_root.
+/// Thin wrapper over core for backward compatibility.
 pub fn resolve_import_path(
     module_specifier: &str,
     from_file: &Path,
     scan_root: &Path,
 ) -> Option<String> {
-    // Canonicalize base_dir: use the parent directory of from_file.
-    // If the parent directory exists (even if from_file itself doesn't), canonicalize it.
-    // Otherwise fall back to the non-canonical parent for path arithmetic.
-    let base_dir_raw = from_file.parent()?;
-    let base_dir = base_dir_raw
-        .canonicalize()
-        .unwrap_or_else(|_| base_dir_raw.to_path_buf());
-    // We must JOIN (not resolve) so that dotted module names like "user.service" are preserved:
-    // appending ".ts" yields "user.service.ts", not "user.ts".
-    let raw_path = base_dir.join(module_specifier);
-    let canonical_root = scan_root.canonicalize().ok()?;
-    resolve_absolute_base_to_file(&raw_path, &canonical_root)
+    let ext = crate::TypeScriptExtractor::new();
+    exspec_core::observe::resolve_import_path(&ext, module_specifier, from_file, scan_root)
 }
 
-/// Resolve an already-computed absolute base path to an actual TypeScript/JavaScript file.
-///
-/// Probes in order:
-/// 1. Direct hit (when `base` already has a known TS/JS extension).
-/// 2. Append each known extension (preserves dotted names, e.g. `user.service` → `user.service.ts`).
-/// 3. Directory index fallback (`<base>/index.ts`, `<base>/index.tsx`).
-///
-/// Returns `None` if no existing file is found inside `canonical_root`.
-fn resolve_absolute_base_to_file(base: &Path, canonical_root: &Path) -> Option<String> {
-    const TS_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx"];
-    let has_known_ext = base
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| TS_EXTENSIONS.contains(&e));
-
-    let candidates: Vec<PathBuf> = if has_known_ext {
-        vec![base.to_path_buf()]
-    } else {
-        let base_str = base.as_os_str().to_string_lossy();
-        TS_EXTENSIONS
-            .iter()
-            .map(|ext| PathBuf::from(format!("{base_str}.{ext}")))
-            .collect()
-    };
-
-    for candidate in &candidates {
-        if let Ok(canonical) = candidate.canonicalize() {
-            if canonical.starts_with(canonical_root) {
-                return Some(canonical.to_string_lossy().into_owned());
-            }
-        }
-    }
-
-    // Fallback: directory index
-    if !has_known_ext {
-        let base_str = base.as_os_str().to_string_lossy();
-        let index_candidates = [
-            PathBuf::from(format!("{base_str}/index.ts")),
-            PathBuf::from(format!("{base_str}/index.tsx")),
-        ];
-        for candidate in &index_candidates {
-            if let Ok(canonical) = candidate.canonicalize() {
-                if canonical.starts_with(canonical_root) {
-                    return Some(canonical.to_string_lossy().into_owned());
-                }
-            }
-        }
-    }
-
-    None
+/// Resolve an already-computed absolute base path. Delegates to core.
+fn resolve_absolute_base_to_file(
+    ext: &dyn ObserveExtractor,
+    base: &Path,
+    canonical_root: &Path,
+) -> Option<String> {
+    exspec_core::observe::resolve_absolute_base_to_file(ext, base, canonical_root)
 }
 
 /// Type definition file: *.enum.*, *.interface.*, *.exception.*
@@ -1127,15 +1050,6 @@ fn is_non_sut_helper(file_path: &str, is_known_production: bool) -> bool {
     false
 }
 
-/// Returns true if the file path ends with `index.ts` or `index.tsx`.
-fn is_barrel_file(path: &str) -> bool {
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .unwrap_or("");
-    file_name == "index.ts" || file_name == "index.tsx"
-}
-
 /// Check if a TypeScript file exports any of the given symbol names.
 /// Used to filter wildcard re-export targets by requested symbols.
 fn file_exports_any_symbol(file_path: &Path, symbols: &[String]) -> bool {
@@ -1172,107 +1086,14 @@ fn file_exports_any_symbol(file_path: &Path, symbols: &[String]) -> bool {
     false
 }
 
-/// Resolve barrel re-exports starting from `barrel_path` for the given `symbols`.
-/// Follows up to 3 hops, prevents cycles via `visited` set.
-/// Returns the list of resolved non-barrel production file paths.
+/// Resolve barrel re-exports. Thin wrapper over core for backward compatibility.
 pub fn resolve_barrel_exports(
     barrel_path: &Path,
     symbols: &[String],
     scan_root: &Path,
 ) -> Vec<PathBuf> {
-    let canonical_root = match scan_root.canonicalize() {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let extractor = crate::TypeScriptExtractor::new();
-    let mut visited: HashSet<PathBuf> = HashSet::new();
-    let mut results: Vec<PathBuf> = Vec::new();
-    resolve_barrel_exports_inner(
-        barrel_path,
-        symbols,
-        scan_root,
-        &canonical_root,
-        &extractor,
-        &mut visited,
-        0,
-        &mut results,
-    );
-    results
-}
-
-#[allow(clippy::too_many_arguments)]
-fn resolve_barrel_exports_inner(
-    barrel_path: &Path,
-    symbols: &[String],
-    scan_root: &Path,
-    canonical_root: &Path,
-    extractor: &crate::TypeScriptExtractor,
-    visited: &mut HashSet<PathBuf>,
-    depth: usize,
-    results: &mut Vec<PathBuf>,
-) {
-    if depth >= MAX_BARREL_DEPTH {
-        return;
-    }
-
-    let canonical_barrel = match barrel_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    if !visited.insert(canonical_barrel) {
-        return;
-    }
-
-    let source = match std::fs::read_to_string(barrel_path) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-
-    let re_exports = extractor.extract_barrel_re_exports(&source, &barrel_path.to_string_lossy());
-
-    for re_export in &re_exports {
-        // For named re-exports, skip if none of the requested symbols match.
-        // When symbols is empty (e.g. wildcard import or no symbol info available),
-        // treat as "match all" to be conservative — may over-resolve but avoids FN.
-        if !re_export.wildcard {
-            let has_match =
-                symbols.is_empty() || symbols.iter().any(|s| re_export.symbols.contains(s));
-            if !has_match {
-                continue;
-            }
-        }
-
-        if let Some(resolved_str) =
-            resolve_import_path(&re_export.from_specifier, barrel_path, scan_root)
-        {
-            if is_barrel_file(&resolved_str) {
-                resolve_barrel_exports_inner(
-                    &PathBuf::from(&resolved_str),
-                    symbols,
-                    scan_root,
-                    canonical_root,
-                    extractor,
-                    visited,
-                    depth + 1,
-                    results,
-                );
-            } else if !is_non_sut_helper(&resolved_str, false) {
-                // For wildcard re-exports with known symbols, verify the target file
-                // actually exports at least one of the requested symbols before including it.
-                if !symbols.is_empty()
-                    && re_export.wildcard
-                    && !file_exports_any_symbol(Path::new(&resolved_str), symbols)
-                {
-                    continue;
-                }
-                if let Ok(canonical) = PathBuf::from(&resolved_str).canonicalize() {
-                    if canonical.starts_with(canonical_root) && !results.contains(&canonical) {
-                        results.push(canonical);
-                    }
-                }
-            }
-        }
-    }
+    let ext = crate::TypeScriptExtractor::new();
+    exspec_core::observe::resolve_barrel_exports(&ext, barrel_path, symbols, scan_root)
 }
 
 fn production_stem(path: &str) -> Option<&str> {

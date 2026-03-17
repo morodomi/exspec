@@ -280,7 +280,7 @@ fn main() {
 
 fn run_observe(args: ObserveArgs) {
     if args.lang != "typescript" {
-        eprintln!("error: observe is only supported for typescript");
+        eprintln!("error: observe is not yet supported for {}", args.lang);
         process::exit(1);
     }
 
@@ -342,8 +342,8 @@ fn run_observe(args: ObserveArgs) {
         } else {
             prod_to_tests.insert(m.production_file.clone(), m.test_files.clone());
             let strategy = match m.strategy {
-                exspec_lang_typescript::observe::MappingStrategy::FileNameConvention => "filename",
-                exspec_lang_typescript::observe::MappingStrategy::ImportTracing => "import",
+                exspec_core::observe::MappingStrategy::FileNameConvention => "filename",
+                exspec_core::observe::MappingStrategy::ImportTracing => "import",
             };
             file_entries.push(ObserveFileEntry {
                 production_file: m.production_file.clone(),
