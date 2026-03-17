@@ -41,22 +41,20 @@ cargo run -- --lang rust .                      # self-dogfooding (BLOCK 0件を
 spec → sync-plan → plan-review → orchestrate(RED → GREEN → REFACTOR → REVIEW → COMMIT)
 ```
 
-- spec: plan mode でスコープ定義
-- sync-plan: plan を Cycle doc へ昇格
-- plan-review: 設計検証（Codex 利用可能時は competitive review）
-- orchestrate: RED→GREEN→REFACTOR→REVIEW→COMMITを自律管理
-
-**orchestrate** (`dev-crew:orchestrate`): PdMとしてRED→GREEN→REFACTOR→REVIEW→COMMITを自律管理。PASS/WARN→自動進行、BLOCK→再試行→ユーザー報告。
+Cycle docs: `docs/cycles/YYYYMMDD_HHMM_<topic>.md`
 
 ### Post-Approve Action
 
-plan approve 後の実行順序:
+Plan mode を抜けたら、直接実装に入らず以下を順に実行する:
 
-1. **sync-plan**: Cycle doc 作成
-2. **plan-review**: 設計レビュー (design-reviewer)
-3. **orchestrate**: RED → GREEN → REFACTOR → REVIEW → COMMIT
-
-Cycle docs: `docs/cycles/YYYYMMDD_HHMM_<topic>.md`
+1. Plan mode を抜けたら、Cycle Doc に内容をコピーする (`dev-crew:sync-plan`)
+   - Cycle Doc なしの実装は `pre-red-gate.sh` でブロックされる
+2. Cycle Doc をレビューする (`dev-crew:review --plan`)
+   - BLOCK 判定なら Plan に戻る
+3. レビュー通過後、実装フローを回す (`dev-crew:orchestrate`)
+   - RED → GREEN → REFACTOR → REVIEW → COMMIT を自律管理
+   - PASS/WARN → 自動進行、BLOCK → 再試行 → ユーザー報告
+   - COMMIT 前に `pre-commit-gate.sh` で REVIEW 完了を検証
 
 ## Quality Standards
 
