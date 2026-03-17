@@ -1,7 +1,7 @@
 ---
 feature: "Fix #99 — Rust observe: pub mod を wildcard re-export として扱う"
 cycle: "20260318_0100"
-phase: RED
+phase: DONE
 complexity: trivial
 test_count: 4
 risk_level: low
