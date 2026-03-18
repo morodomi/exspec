@@ -1190,47 +1190,95 @@ def endpoint():
     }
 
     // -----------------------------------------------------------------------
+    // Helper: setup tempdir with files and run map_test_files_with_imports
+    // -----------------------------------------------------------------------
+
+    struct ImportTestResult {
+        mappings: Vec<FileMapping>,
+        prod_path: String,
+        test_path: String,
+        _tmp: tempfile::TempDir,
+    }
+
+    /// Create a tempdir with one production file and one test file, then run
+    /// `map_test_files_with_imports`. `extra_files` are written but not included
+    /// in `production_files` or `test_sources` (e.g. `__init__.py`).
+    fn run_import_test(
+        prod_rel: &str,
+        prod_content: &str,
+        test_rel: &str,
+        test_content: &str,
+        extra_files: &[(&str, &str)],
+    ) -> ImportTestResult {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Write extra files first (e.g. __init__.py)
+        for (rel, content) in extra_files {
+            let path = tmp.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, content).unwrap();
+        }
+
+        // Write production file
+        let prod_abs = tmp.path().join(prod_rel);
+        if let Some(parent) = prod_abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&prod_abs, prod_content).unwrap();
+
+        // Write test file
+        let test_abs = tmp.path().join(test_rel);
+        if let Some(parent) = test_abs.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&test_abs, test_content).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = prod_abs.to_string_lossy().into_owned();
+        let test_path = test_abs.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        let mappings =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        ImportTestResult {
+            mappings,
+            prod_path,
+            test_path,
+            _tmp: tmp,
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // PY-ABS-01: `from models.cars import Car` -> mapped to models/cars.py via Layer 2
     // -----------------------------------------------------------------------
     #[test]
     fn py_abs_01_absolute_import_nested_module() {
         // Given: `from models.cars import Car` in tests/unit/test_car.py,
         //        models/cars.py exists at scan_root
-        let tmp = tempfile::tempdir().unwrap();
-        let models_dir = tmp.path().join("models");
-        let tests_unit_dir = tmp.path().join("tests").join("unit");
-        std::fs::create_dir_all(&models_dir).unwrap();
-        std::fs::create_dir_all(&tests_unit_dir).unwrap();
-
-        let cars_py = models_dir.join("cars.py");
-        std::fs::write(&cars_py, "class Car:\n    pass\n").unwrap();
-
-        let test_car_py = tests_unit_dir.join("test_car.py");
-        let test_source = "from models.cars import Car\n\ndef test_car():\n    pass\n";
-        std::fs::write(&test_car_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = cars_py.to_string_lossy().into_owned();
-        let test_path = test_car_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        let r = run_import_test(
+            "models/cars.py",
+            "class Car:\n    pass\n",
+            "tests/unit/test_car.py",
+            "from models.cars import Car\n\ndef test_car():\n    pass\n",
+            &[],
+        );
 
         // Then: models/cars.py is mapped to test_car.py via Layer 2 (ImportTracing)
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
             "models/cars.py not found in mappings: {:?}",
-            result
+            r.mappings
         );
         let mapping = mapping.unwrap();
         assert!(
-            mapping.test_files.contains(&test_path),
+            mapping.test_files.contains(&r.test_path),
             "test_car.py not in test_files for models/cars.py: {:?}",
             mapping.test_files
         );
@@ -1249,42 +1297,24 @@ def endpoint():
     fn py_abs_02_absolute_import_utils_module() {
         // Given: `from utils.publish_state import PublishState` in tests/test_pub.py,
         //        utils/publish_state.py exists at scan_root
-        let tmp = tempfile::tempdir().unwrap();
-        let utils_dir = tmp.path().join("utils");
-        let tests_dir = tmp.path().join("tests");
-        std::fs::create_dir_all(&utils_dir).unwrap();
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        let publish_state_py = utils_dir.join("publish_state.py");
-        std::fs::write(&publish_state_py, "class PublishState:\n    pass\n").unwrap();
-
-        let test_pub_py = tests_dir.join("test_pub.py");
-        let test_source =
-            "from utils.publish_state import PublishState\n\ndef test_pub():\n    pass\n";
-        std::fs::write(&test_pub_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = publish_state_py.to_string_lossy().into_owned();
-        let test_path = test_pub_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        let r = run_import_test(
+            "utils/publish_state.py",
+            "class PublishState:\n    pass\n",
+            "tests/test_pub.py",
+            "from utils.publish_state import PublishState\n\ndef test_pub():\n    pass\n",
+            &[],
+        );
 
         // Then: utils/publish_state.py is mapped to test_pub.py via Layer 2
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
             "utils/publish_state.py not found in mappings: {:?}",
-            result
+            r.mappings
         );
         let mapping = mapping.unwrap();
         assert!(
-            mapping.test_files.contains(&test_path),
+            mapping.test_files.contains(&r.test_path),
             "test_pub.py not in test_files for utils/publish_state.py: {:?}",
             mapping.test_files
         );
@@ -1303,39 +1333,24 @@ def endpoint():
     fn py_abs_03_relative_import_still_resolves() {
         // Given: `from .models import X` in tests/test_something.py,
         //        tests/models.py exists relative to test file
-        let tmp = tempfile::tempdir().unwrap();
-        let tests_dir = tmp.path().join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        let models_py = tests_dir.join("models.py");
-        std::fs::write(&models_py, "class X:\n    pass\n").unwrap();
-
-        let test_py = tests_dir.join("test_something.py");
-        let test_source = "from .models import X\n\ndef test_x():\n    pass\n";
-        std::fs::write(&test_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = models_py.to_string_lossy().into_owned();
-        let test_path = test_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        let r = run_import_test(
+            "tests/models.py",
+            "class X:\n    pass\n",
+            "tests/test_something.py",
+            "from .models import X\n\ndef test_x():\n    pass\n",
+            &[],
+        );
 
         // Then: models.py is mapped to test_something.py (relative import resolves from parent dir)
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
             "tests/models.py not found in mappings: {:?}",
-            result
+            r.mappings
         );
         let mapping = mapping.unwrap();
         assert!(
-            mapping.test_files.contains(&test_path),
+            mapping.test_files.contains(&r.test_path),
             "test_something.py not in test_files for tests/models.py: {:?}",
             mapping.test_files
         );
@@ -1400,43 +1415,24 @@ def endpoint():
     fn py_srclayout_01_src_layout_absolute_import_resolved() {
         // Given: tempdir with "src/mypackage/__init__.py" + "src/mypackage/sessions.py"
         //        and test file "tests/test_sessions.py" containing "from mypackage.sessions import Session"
-        let tmp = tempfile::tempdir().unwrap();
-        let src_pkg_dir = tmp.path().join("src").join("mypackage");
-        let tests_dir = tmp.path().join("tests");
-        std::fs::create_dir_all(&src_pkg_dir).unwrap();
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        std::fs::write(src_pkg_dir.join("__init__.py"), "").unwrap();
-        let sessions_py = src_pkg_dir.join("sessions.py");
-        std::fs::write(&sessions_py, "class Session:\n    pass\n").unwrap();
-
-        let test_sessions_py = tests_dir.join("test_sessions.py");
-        let test_source =
-            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n";
-        std::fs::write(&test_sessions_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = sessions_py.to_string_lossy().into_owned();
-        let test_path = test_sessions_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called with scan_root = tmp.path()
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        let r = run_import_test(
+            "src/mypackage/sessions.py",
+            "class Session:\n    pass\n",
+            "tests/test_sessions.py",
+            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n",
+            &[("src/mypackage/__init__.py", "")],
+        );
 
         // Then: sessions.py is in test_files for test_sessions.py
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
             "src/mypackage/sessions.py not found in mappings: {:?}",
-            result
+            r.mappings
         );
         let mapping = mapping.unwrap();
         assert!(
-            mapping.test_files.contains(&test_path),
+            mapping.test_files.contains(&r.test_path),
             "test_sessions.py not in test_files for sessions.py (src/ layout): {:?}",
             mapping.test_files
         );
@@ -1450,42 +1446,24 @@ def endpoint():
     fn py_srclayout_02_non_src_layout_regression() {
         // Given: tempdir with "mypackage/sessions.py"
         //        and test file "tests/test_sessions.py" containing "from mypackage.sessions import Session"
-        let tmp = tempfile::tempdir().unwrap();
-        let pkg_dir = tmp.path().join("mypackage");
-        let tests_dir = tmp.path().join("tests");
-        std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        let sessions_py = pkg_dir.join("sessions.py");
-        std::fs::write(&sessions_py, "class Session:\n    pass\n").unwrap();
-
-        let test_sessions_py = tests_dir.join("test_sessions.py");
-        let test_source =
-            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n";
-        std::fs::write(&test_sessions_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = sessions_py.to_string_lossy().into_owned();
-        let test_path = test_sessions_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called with scan_root = tmp.path()
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        let r = run_import_test(
+            "mypackage/sessions.py",
+            "class Session:\n    pass\n",
+            "tests/test_sessions.py",
+            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n",
+            &[],
+        );
 
         // Then: sessions.py is in test_files for test_sessions.py (non-src layout still works)
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
             "mypackage/sessions.py not found in mappings: {:?}",
-            result
+            r.mappings
         );
         let mapping = mapping.unwrap();
         assert!(
-            mapping.test_files.contains(&test_path),
+            mapping.test_files.contains(&r.test_path),
             "test_sessions.py not in test_files for sessions.py (non-src layout): {:?}",
             mapping.test_files
         );
@@ -1498,38 +1476,21 @@ def endpoint():
     #[test]
     fn py_abs_04_nonexistent_absolute_import_skipped() {
         // Given: `from nonexistent.module import X` in test file,
-        //        nonexistent/module.py does NOT exist at scan_root
-        let tmp = tempfile::tempdir().unwrap();
-        let models_dir = tmp.path().join("models");
-        let tests_dir = tmp.path().join("tests");
-        std::fs::create_dir_all(&models_dir).unwrap();
-        std::fs::create_dir_all(&tests_dir).unwrap();
-
-        // A real production file to have something in production_files
-        let real_py = models_dir.join("real.py");
-        std::fs::write(&real_py, "class Real:\n    pass\n").unwrap();
-
-        let test_py = tests_dir.join("test_missing.py");
-        let test_source = "from nonexistent.module import X\n\ndef test_x():\n    pass\n";
-        std::fs::write(&test_py, test_source).unwrap();
-
-        let extractor = PythonExtractor::new();
-        let prod_path = real_py.to_string_lossy().into_owned();
-        let test_path = test_py.to_string_lossy().into_owned();
-        let production_files = vec![prod_path.clone()];
-        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
-            .into_iter()
-            .collect();
-
-        // When: map_test_files_with_imports is called
-        let result =
-            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+        //        nonexistent/module.py does NOT exist at scan_root.
+        //        models/real.py exists as production file but is NOT imported.
+        let r = run_import_test(
+            "models/real.py",
+            "class Real:\n    pass\n",
+            "tests/test_missing.py",
+            "from nonexistent.module import X\n\ndef test_x():\n    pass\n",
+            &[],
+        );
 
         // Then: test_missing.py is NOT mapped to models/real.py (unresolvable import skipped)
-        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         if let Some(mapping) = mapping {
             assert!(
-                !mapping.test_files.contains(&test_path),
+                !mapping.test_files.contains(&r.test_path),
                 "test_missing.py should NOT be mapped to models/real.py: {:?}",
                 mapping.test_files
             );
