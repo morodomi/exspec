@@ -530,21 +530,28 @@ const SKIP_DIRS: &[&str] = &["target", ".cargo", "vendor"];
 /// Maximum directory traversal depth when searching for workspace members.
 const MAX_TRAVERSE_DEPTH: usize = 4;
 
+/// Check whether a `Cargo.toml` at `scan_root` contains a `[workspace]` section.
+pub fn has_workspace_section(scan_root: &Path) -> bool {
+    let cargo_toml = scan_root.join("Cargo.toml");
+    let content = match std::fs::read_to_string(&cargo_toml) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    content.lines().any(|line| line.trim() == "[workspace]")
+}
+
 /// Find all member crates in a Cargo workspace rooted at `scan_root`.
 ///
-/// Returns an empty `Vec` if `scan_root` is not a workspace root (i.e. its
-/// `Cargo.toml` has a `[package]` section rather than `[workspace]`).
+/// Returns an empty `Vec` if `scan_root` does not have a `[workspace]` section
+/// in its `Cargo.toml`.
+///
+/// Supports both virtual workspaces (no `[package]`) and non-virtual workspaces
+/// (both `[workspace]` and `[package]`).
 ///
 /// Directories named `target`, `.cargo`, `vendor`, or starting with `.` are
 /// skipped.  Traversal is limited to `MAX_TRAVERSE_DEPTH` levels.
 pub fn find_workspace_members(scan_root: &Path) -> Vec<WorkspaceMember> {
-    // Only proceed if the root Cargo.toml is a workspace (no [package])
-    if parse_crate_name(scan_root).is_some() {
-        // This is a single-crate root, not a workspace
-        return Vec::new();
-    }
-    let cargo_toml = scan_root.join("Cargo.toml");
-    if !cargo_toml.exists() {
+    if !has_workspace_section(scan_root) {
         return Vec::new();
     }
 
@@ -823,10 +830,11 @@ impl RustExtractor {
 
         // Resolve crate name for integration test import matching
         let crate_name = parse_crate_name(scan_root);
+        let members = find_workspace_members(scan_root);
 
         // Layer 2: import tracing
         if let Some(ref name) = crate_name {
-            // Single-crate mode: use scan_root as the crate root
+            // Root has a [package]: apply L2 for root crate itself
             self.apply_l2_imports(
                 test_sources,
                 name,
@@ -835,44 +843,42 @@ impl RustExtractor {
                 &canonical_to_idx,
                 &mut mappings,
             );
-        } else {
-            // Try workspace mode first
-            let members = find_workspace_members(scan_root);
-            if !members.is_empty() {
-                // Workspace mode: apply L2 per member crate
-                for member in &members {
-                    // Collect only the test files belonging to this member
-                    let member_test_sources: HashMap<String, String> = test_sources
-                        .iter()
-                        .filter(|(path, _)| {
-                            find_member_for_path(Path::new(path.as_str()), &members)
-                                .map(|m| std::ptr::eq(m, member))
-                                .unwrap_or(false)
-                        })
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+        }
 
-                    self.apply_l2_imports(
-                        &member_test_sources,
-                        &member.crate_name,
-                        &member.member_root,
-                        &canonical_root,
-                        &canonical_to_idx,
-                        &mut mappings,
-                    );
-                }
-            } else {
-                // Fallback: no Cargo.toml or no members; apply L2 with "crate" pseudo-name
-                // to handle `use crate::...` references in any crate root
+        if !members.is_empty() {
+            // Workspace mode: apply L2 per member crate
+            for member in &members {
+                // Collect only the test files belonging to this member
+                let member_test_sources: HashMap<String, String> = test_sources
+                    .iter()
+                    .filter(|(path, _)| {
+                        find_member_for_path(Path::new(path.as_str()), &members)
+                            .map(|m| std::ptr::eq(m, member))
+                            .unwrap_or(false)
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+
                 self.apply_l2_imports(
-                    test_sources,
-                    "crate",
-                    scan_root,
+                    &member_test_sources,
+                    &member.crate_name,
+                    &member.member_root,
                     &canonical_root,
                     &canonical_to_idx,
                     &mut mappings,
                 );
             }
+        } else if crate_name.is_none() {
+            // Fallback: no [package] and no workspace members; apply L2 with "crate"
+            // pseudo-name to handle `use crate::...` references
+            self.apply_l2_imports(
+                test_sources,
+                "crate",
+                scan_root,
+                &canonical_root,
+                &canonical_to_idx,
+                &mut mappings,
+            );
         }
 
         // Update strategy: if a production file had no Layer 1 matches but has Layer 2 matches,
@@ -2418,5 +2424,129 @@ mod tests {
             "Expected test_service.rs mapped (Layer 1), got: {:?}",
             mapping.test_files
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-WS-E2E-03: Non-virtual workspace (both [workspace] and [package])
+    //
+    // Root Cargo.toml has both [workspace] and [package] (like clap).
+    // L2 must work for both root crate and member crates.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_ws_e2e_03_non_virtual_workspace_l2() {
+        // Given: a non-virtual workspace with root package "root_pkg"
+        // and member "member_a"
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member_a\"]\n\n[package]\nname = \"root_pkg\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Root crate src + tests
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let root_src = tmp.path().join("src").join("lib.rs");
+        std::fs::write(&root_src, "pub fn root_fn() {}\n").unwrap();
+        let root_test = tmp.path().join("tests").join("test_root.rs");
+        std::fs::write(
+            &root_test,
+            "use root_pkg::lib::root_fn;\n#[test]\nfn test_root() { }\n",
+        )
+        .unwrap();
+
+        // Member crate
+        let member_dir = tmp.path().join("member_a");
+        std::fs::create_dir_all(member_dir.join("src")).unwrap();
+        std::fs::create_dir_all(member_dir.join("tests")).unwrap();
+        std::fs::write(
+            member_dir.join("Cargo.toml"),
+            "[package]\nname = \"member_a\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let member_src = member_dir.join("src").join("handler.rs");
+        std::fs::write(&member_src, "pub fn handle() {}\n").unwrap();
+        let member_test = member_dir.join("tests").join("test_handler.rs");
+        std::fs::write(
+            &member_test,
+            "use member_a::handler::handle;\n#[test]\nfn test_handle() { handle(); }\n",
+        )
+        .unwrap();
+
+        let extractor = RustExtractor::new();
+        let root_src_path = root_src.to_string_lossy().into_owned();
+        let member_src_path = member_src.to_string_lossy().into_owned();
+        let root_test_path = root_test.to_string_lossy().into_owned();
+        let member_test_path = member_test.to_string_lossy().into_owned();
+
+        let production_files = vec![root_src_path.clone(), member_src_path.clone()];
+        let test_sources: HashMap<String, String> = [
+            (
+                root_test_path.clone(),
+                std::fs::read_to_string(&root_test).unwrap(),
+            ),
+            (
+                member_test_path.clone(),
+                std::fs::read_to_string(&member_test).unwrap(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        // When: map_test_files_with_imports at workspace root
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: member's test maps to member's src via L2
+        let member_mapping = result.iter().find(|m| m.production_file == member_src_path);
+        assert!(member_mapping.is_some(), "No mapping for member handler.rs");
+        let member_mapping = member_mapping.unwrap();
+        assert!(
+            member_mapping.test_files.contains(&member_test_path),
+            "Expected member test mapped via L2, got: {:?}",
+            member_mapping.test_files
+        );
+        assert_eq!(
+            member_mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "Expected ImportTracing for member, got: {:?}",
+            member_mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-WS-08: has_workspace_section detects [workspace]
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_ws_08_has_workspace_section() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Virtual workspace
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\"]\n",
+        )
+        .unwrap();
+        assert!(has_workspace_section(tmp.path()));
+
+        // Non-virtual workspace
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\"]\n\n[package]\nname = \"root\"\n",
+        )
+        .unwrap();
+        assert!(has_workspace_section(tmp.path()));
+
+        // Single crate (no workspace)
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"single\"\n",
+        )
+        .unwrap();
+        assert!(!has_workspace_section(tmp.path()));
+
+        // No Cargo.toml
+        std::fs::remove_file(tmp.path().join("Cargo.toml")).unwrap();
+        assert!(!has_workspace_section(tmp.path()));
     }
 }
