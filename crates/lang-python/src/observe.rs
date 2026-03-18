@@ -55,6 +55,7 @@ pub fn test_stem(path: &str) -> Option<&str> {
 
 /// Extract stem from a production file path.
 /// `user.py` -> `Some("user")`
+/// `_decoders.py` -> `Some("decoders")` (leading `_` stripped)
 /// `__init__.py` -> `None`
 /// `test_user.py` -> `None`
 pub fn production_stem(path: &str) -> Option<&str> {
@@ -68,6 +69,8 @@ pub fn production_stem(path: &str) -> Option<&str> {
     if stem.starts_with("test_") || stem.ends_with("_test") {
         return None;
     }
+    let stem = stem.strip_prefix('_').unwrap_or(stem);
+    let stem = stem.strip_suffix("__").unwrap_or(stem);
     Some(stem)
 }
 
@@ -596,11 +599,20 @@ impl PythonExtractor {
             let abs_specifiers = self.extract_all_import_specifiers(source);
             for (specifier, symbols) in &abs_specifiers {
                 let base = canonical_root.join(specifier);
-                if let Some(resolved) = exspec_core::observe::resolve_absolute_base_to_file(
+                let resolved = exspec_core::observe::resolve_absolute_base_to_file(
                     self,
                     &base,
                     &canonical_root,
-                ) {
+                )
+                .or_else(|| {
+                    let src_base = canonical_root.join("src").join(specifier);
+                    exspec_core::observe::resolve_absolute_base_to_file(
+                        self,
+                        &src_base,
+                        &canonical_root,
+                    )
+                });
+                if let Some(resolved) = resolved {
                     exspec_core::observe::collect_import_matches(
                         self,
                         &resolved,
@@ -1325,6 +1337,142 @@ def endpoint():
         assert!(
             mapping.test_files.contains(&test_path),
             "test_something.py not in test_files for tests/models.py: {:?}",
+            mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-STEM-07: _decoders.py -> production_stem strips single leading underscore
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_07_production_stem_single_underscore_prefix() {
+        // Given: production file path "httpx/_decoders.py"
+        // When: production_stem() is called
+        // Then: returns Some("decoders") (single leading underscore stripped)
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("httpx/_decoders.py");
+        assert_eq!(result, Some("decoders"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-STEM-08: __version__.py -> production_stem strips only one underscore
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_08_production_stem_double_underscore_strips_one() {
+        // Given: production file path "httpx/__version__.py"
+        // When: production_stem() is called
+        // Then: returns Some("_version") (only one leading underscore stripped, not __init__ which returns None)
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("httpx/__version__.py");
+        assert_eq!(result, Some("_version"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-STEM-09: decoders.py -> production_stem unchanged (regression)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_09_production_stem_no_prefix_regression() {
+        // Given: production file path "httpx/decoders.py" (no underscore prefix)
+        // When: production_stem() is called
+        // Then: returns Some("decoders") (unchanged, no regression)
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("httpx/decoders.py");
+        assert_eq!(result, Some("decoders"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SRCLAYOUT-01: src/ layout absolute import resolved
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_srclayout_01_src_layout_absolute_import_resolved() {
+        // Given: tempdir with "src/mypackage/__init__.py" + "src/mypackage/sessions.py"
+        //        and test file "tests/test_sessions.py" containing "from mypackage.sessions import Session"
+        let tmp = tempfile::tempdir().unwrap();
+        let src_pkg_dir = tmp.path().join("src").join("mypackage");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_pkg_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(src_pkg_dir.join("__init__.py"), "").unwrap();
+        let sessions_py = src_pkg_dir.join("sessions.py");
+        std::fs::write(&sessions_py, "class Session:\n    pass\n").unwrap();
+
+        let test_sessions_py = tests_dir.join("test_sessions.py");
+        let test_source =
+            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n";
+        std::fs::write(&test_sessions_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = sessions_py.to_string_lossy().into_owned();
+        let test_path = test_sessions_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called with scan_root = tmp.path()
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: sessions.py is in test_files for test_sessions.py
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "src/mypackage/sessions.py not found in mappings: {:?}",
+            result
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "test_sessions.py not in test_files for sessions.py (src/ layout): {:?}",
+            mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SRCLAYOUT-02: non-src layout still works (regression)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_srclayout_02_non_src_layout_regression() {
+        // Given: tempdir with "mypackage/sessions.py"
+        //        and test file "tests/test_sessions.py" containing "from mypackage.sessions import Session"
+        let tmp = tempfile::tempdir().unwrap();
+        let pkg_dir = tmp.path().join("mypackage");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        let sessions_py = pkg_dir.join("sessions.py");
+        std::fs::write(&sessions_py, "class Session:\n    pass\n").unwrap();
+
+        let test_sessions_py = tests_dir.join("test_sessions.py");
+        let test_source =
+            "from mypackage.sessions import Session\n\ndef test_session():\n    pass\n";
+        std::fs::write(&test_sessions_py, test_source).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = sessions_py.to_string_lossy().into_owned();
+        let test_path = test_sessions_py.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called with scan_root = tmp.path()
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, tmp.path());
+
+        // Then: sessions.py is in test_files for test_sessions.py (non-src layout still works)
+        let mapping = result.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "mypackage/sessions.py not found in mappings: {:?}",
+            result
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "test_sessions.py not in test_files for sessions.py (non-src layout): {:?}",
             mapping.test_files
         );
     }
