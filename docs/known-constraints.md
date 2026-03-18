@@ -66,6 +66,15 @@ def test_benchmark_performance(benchmark):
     benchmark(my_function)
 ```
 
+## Python observe: src/ layout fallback
+
+Python observe's Layer 2 (import tracing) supports the standard `src/` layout (`src/package/module.py`). When an absolute import like `from package.module import X` cannot be resolved under the scan root directly, exspec falls back to `<scan_root>/src/` as a second candidate.
+
+**Limitations:**
+
+- Only `src/` at depth 1 is supported. Non-standard layouts like `source/`, `lib/`, or nested `src/src/` are not detected.
+- The fallback is tried after the direct resolution, so if both `package/module.py` and `src/package/module.py` exist, the direct resolution wins.
+
 ## Callback / wrapper patterns
 
 Tests that pass assertions through callbacks (e.g. `done()` in Mocha-style async tests) or return assertion wrappers may not be recognized:

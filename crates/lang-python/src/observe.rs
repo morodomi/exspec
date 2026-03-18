@@ -1422,6 +1422,19 @@ def endpoint():
     }
 
     // -----------------------------------------------------------------------
+    // PY-STEM-12: __foo__.py -> strip_prefix + strip_suffix (double underscore prefix)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_12_production_stem_dunder_prefix_and_suffix() {
+        // Given: production file path "pkg/__foo__.py"
+        // When: production_stem() is called
+        // Then: returns Some("_foo") (strip_prefix('_') -> "_foo__", strip_suffix("__") -> "_foo")
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("pkg/__foo__.py");
+        assert_eq!(result, Some("_foo"));
+    }
+
+    // -----------------------------------------------------------------------
     // PY-SRCLAYOUT-01: src/ layout absolute import resolved
     // -----------------------------------------------------------------------
     #[test]
@@ -1561,10 +1574,11 @@ def endpoint():
             "models/cars.py not found in mappings: {:?}",
             result
         );
+        let cars_m = cars_mapping.unwrap();
         assert!(
-            cars_mapping.unwrap().test_files.contains(&test_path),
+            cars_m.test_files.contains(&test_path),
             "test_mixed.py not mapped to models/cars.py via absolute import: {:?}",
-            cars_mapping.unwrap().test_files
+            cars_m.test_files
         );
 
         // Then: tests/helpers.py is mapped via relative import (Layer 2)
@@ -1574,10 +1588,41 @@ def endpoint():
             "tests/helpers.py not found in mappings: {:?}",
             result
         );
+        let helpers_m = helpers_mapping.unwrap();
         assert!(
-            helpers_mapping.unwrap().test_files.contains(&test_path),
+            helpers_m.test_files.contains(&test_path),
             "test_mixed.py not mapped to tests/helpers.py via relative import: {:?}",
-            helpers_mapping.unwrap().test_files
+            helpers_m.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-REL-01: `from .. import X` bare two-dot relative import
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_rel_01_bare_two_dot_relative_import() {
+        // Given: `from .. import utils` in pkg/sub/test_thing.py,
+        //        pkg/utils.py exists (parent of parent)
+        let r = run_import_test(
+            "pkg/utils.py",
+            "def helper():\n    pass\n",
+            "pkg/sub/test_thing.py",
+            "from .. import utils\n\ndef test_thing():\n    pass\n",
+            &[],
+        );
+
+        // Then: pkg/utils.py is mapped via bare relative import (is_bare_relative=true path)
+        let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
+        assert!(
+            mapping.is_some(),
+            "pkg/utils.py not found in mappings: {:?}",
+            r.mappings
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&r.test_path),
+            "test_thing.py not in test_files for pkg/utils.py via bare two-dot import: {:?}",
+            mapping.test_files
         );
     }
 }
