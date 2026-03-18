@@ -1381,6 +1381,19 @@ def endpoint():
     }
 
     // -----------------------------------------------------------------------
+    // PY-STEM-10: ___triple.py -> production_stem strips one underscore
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_10_production_stem_triple_underscore() {
+        // Given: production file path "pkg/___triple.py"
+        // When: production_stem() is called
+        // Then: returns Some("__triple") (one leading underscore stripped)
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("pkg/___triple.py");
+        assert_eq!(result, Some("__triple"));
+    }
+
+    // -----------------------------------------------------------------------
     // PY-SRCLAYOUT-01: src/ layout absolute import resolved
     // -----------------------------------------------------------------------
     #[test]
@@ -1427,6 +1440,7 @@ def endpoint():
             "test_sessions.py not in test_files for sessions.py (src/ layout): {:?}",
             mapping.test_files
         );
+        assert_eq!(mapping.strategy, MappingStrategy::ImportTracing);
     }
 
     // -----------------------------------------------------------------------
@@ -1475,6 +1489,7 @@ def endpoint():
             "test_sessions.py not in test_files for sessions.py (non-src layout): {:?}",
             mapping.test_files
         );
+        assert_eq!(mapping.strategy, MappingStrategy::ImportTracing);
     }
 
     // -----------------------------------------------------------------------
