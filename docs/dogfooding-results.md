@@ -729,6 +729,48 @@ When `scan_root` points to a workspace root (e.g., `/tmp/clap`), `parse_crate_na
 3. **Deep re-export chains**: `tokio/src/lib.rs` re-exports `pub mod sync`, but the chain from `use tokio::sync::Mutex` to `src/sync/mutex.rs` requires multi-hop barrel resolution.
 4. **Macro-generated test functions**: tokio's `#[tokio::test]` is handled (detected as `#[test]`), but custom `loom_cfg_*` macros hide some test files.
 
+### Post-#99/#100 Re-verification (2026-03-18)
+
+**exspec version**: post-#100 (commit 0750719)
+**Changes**: #99 (`pub mod` as `wildcard=true` BarrelReExport) + #100 (`file_exports_any_symbol` for Rust)
+
+#### Summary
+
+| Project | Prod | Test | Mapped | L0/L1 | L2 | Unmapped | Delta (mapped) |
+|---------|------|------|--------|-------|----|----------|----------------|
+| exspec | 21 | 1 | 19 | 19 | 0 | 2 | 0 |
+| tokio/tokio | 343 | 198 | 55 | 37 | **18** | 288 | **+4** |
+| clap (workspace) | 195 | 134 | 20 | 20 | 0 | 175 | 0 |
+| clap_complete | 22 | 10 | 5 | 3 | 2 | 17 | 0 |
+| ripgrep | 85 | 15 | 43 | 43 | 0 | 42 | 0 |
+
+#### Regression Check
+
+- L0/L1: all projects unchanged. No regression.
+- broadcast.rs: previously L2, now reported as "filename" strategy (inline test + import test combined). Not a regression — the external test file (sync_broadcast_weak.rs) is still mapped.
+
+#### tokio L2 Changes: 14 -> 18 (+4)
+
+New L2 matches (all verified TP):
+
+| Production File | Test File(s) | Import | Why New |
+|----------------|-------------|--------|---------|
+| src/net/unix/pipe.rs | tests/net_unix_pipe.rs | `use tokio::net::unix::pipe` | `pub mod` chain: net/mod.rs → unix/mod.rs → pipe.rs |
+| src/runtime/dump.rs | tests/task_trace_self.rs | `use tokio::runtime::dump` | `pub mod` chain: runtime/mod.rs → dump.rs |
+| src/sync/mpsc/list.rs | tests/sync_mpsc_weak.rs | `use tokio::sync::mpsc` | `pub mod` chain: sync/mod.rs → mpsc/mod.rs, symbol filter resolves list.rs |
+| src/runtime/task/id.rs | src/runtime/tests/task.rs | `use crate::runtime::task` | `pub mod` chain: runtime/mod.rs → task/mod.rs → id.rs |
+
+All 4 new matches result from `pub mod` being treated as wildcard barrel re-export (#99), enabling multi-hop module chain resolution.
+
+#### Precision/Recall Update
+
+- **Precision**: 100% (18/18 L2 matches verified as TP). Improved from ~98% estimate.
+- **Recall**: ~9% (55/343 production files mapped, vs 51/343 previously). Still low due to deep re-export chains and macro-generated tests.
+
+#### Conclusion
+
+#99/#100 delivered incremental improvement (+4 L2 matches in tokio) with zero false positives and zero regressions. The `pub mod` wildcard strategy correctly resolves multi-hop module chains (e.g., `tokio::net::unix::pipe` → `net/mod.rs` → `unix/mod.rs` → `pipe.rs`). Remaining gaps are workspace-level aggregation and deeper re-export chain resolution.
+
 ## Reproduction
 
 ```bash
