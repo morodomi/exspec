@@ -1409,6 +1409,19 @@ def endpoint():
     }
 
     // -----------------------------------------------------------------------
+    // PY-STEM-11: ___foo__.py -> strip_prefix + strip_suffix chained
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_stem_11_production_stem_prefix_and_suffix_chained() {
+        // Given: production file path "pkg/___foo__.py"
+        // When: production_stem() is called
+        // Then: returns Some("__foo") (strip_prefix('_') -> "__foo__", strip_suffix("__") -> "__foo")
+        let extractor = PythonExtractor::new();
+        let result = extractor.production_stem("pkg/___foo__.py");
+        assert_eq!(result, Some("__foo"));
+    }
+
+    // -----------------------------------------------------------------------
     // PY-SRCLAYOUT-01: src/ layout absolute import resolved
     // -----------------------------------------------------------------------
     #[test]
@@ -1423,7 +1436,9 @@ def endpoint():
             &[("src/mypackage/__init__.py", "")],
         );
 
-        // Then: sessions.py is in test_files for test_sessions.py
+        // Then: sessions.py is in test_files for test_sessions.py.
+        // Layer 1 does not match because prod dir (src/mypackage) != test dir (tests),
+        // so this is resolved via Layer 2 (ImportTracing) with src/ fallback.
         let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),
@@ -1454,7 +1469,9 @@ def endpoint():
             &[],
         );
 
-        // Then: sessions.py is in test_files for test_sessions.py (non-src layout still works)
+        // Then: sessions.py is in test_files for test_sessions.py (non-src layout still works).
+        // Layer 1 does not match because prod dir (mypackage) != test dir (tests),
+        // so this is resolved via Layer 2 (ImportTracing) without src/ fallback.
         let mapping = r.mappings.iter().find(|m| m.production_file == r.prod_path);
         assert!(
             mapping.is_some(),

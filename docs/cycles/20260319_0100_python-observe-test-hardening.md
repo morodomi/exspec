@@ -50,5 +50,5 @@ Cycle doc created from plan.
 
 ## DISCOVERED
 
-- [ ] PY-STEM-11: `"___foo__.py"` で strip_prefix + strip_suffix 連鎖動作をテスト
-- [ ] PY-SRCLAYOUT コメント補足: Layer 1 不成立理由をテストコメントに追記
+- [x] PY-STEM-11: `"___foo__.py"` で strip_prefix + strip_suffix 連鎖動作をテスト
+- [x] PY-SRCLAYOUT コメント補足: Layer 1 不成立理由をテストコメントに追記
