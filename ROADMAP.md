@@ -13,6 +13,24 @@
 
 ## Completed Recently
 
+### Phase 12: Python observe dogfooding + GT (2026-03-19)
+
+Goal: Dogfood Python observe on httpx (30 test files) and Requests (9 test files). Measure P/R/F1 against hand-audited ground truth.
+
+**Results**: httpx P=66.7%, R=6.2%, F1=11.4%. Requests ~0% recall. Both FAIL first-pass criteria (P>=90%, R>=80%).
+
+**Why**: Python observe implementation (Phase 9b) was untested against real projects. Dogfooding revealed fundamental gaps in L1 filename matching and L2 import tracing for Python's common patterns.
+
+**Root Causes**:
+1. L1 filename: `_` prefix not stripped (`test_decoders` vs `_decoders.py`) — 13 FN
+2. L2 barrel: `import httpx` not resolved through `__init__.py` to production files — 28 FN
+3. L1 cross-directory: `tests/client/test_client` vs `httpx/_client` — 10 FN
+4. `src/` layout: Requests' `src/requests/` not detected as production root — total miss
+
+**Decision**: Python observe stays `[experimental]`. P0 fixes (L1 `_` prefix, `src/` layout detection) and P1 fixes (L2 barrel resolution, cross-directory matching) required in separate cycle before re-evaluation.
+
+**Ground truth**: `docs/observe-ground-truth-python-httpx.md`
+
 ### Phase 11: TS observe re-dogfood + GT audit (2026-03-18)
 
 Goal: Re-validate NestJS ground truth after Phase 8c/10 changes. Measure actual Precision/Recall.
@@ -31,6 +49,10 @@ Goal: Extract API route definitions from framework decorators/config. NestJS, Fa
 
 | Priority | Task | Trigger |
 |----------|------|---------|
+| P0 | Python observe L1 fix: `_` prefix stripping in filename match | 13 httpx FN |
+| P0 | Python observe: `src/` layout detection | Requests 0% recall |
+| P1 | Python observe L2: barrel import resolution (`__init__.py` chain) | 28 httpx FN |
+| P1 | Python observe L1: cross-directory stem matching | 10 httpx FN |
 | P1 | Multi-path CLI for observe (B2 cross-package resolution) | 13 FN in NestJS, all B2 |
 | P2 | `exspec init` (framework detection + auto-config) | User onboarding friction |
 

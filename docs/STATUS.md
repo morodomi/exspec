@@ -36,6 +36,16 @@ v0.3.0 development. observe TypeScript: P=100%, R=91% (separate packages), route
 | 8c-4 - context-aware enum/interface filter | **DONE** |
 | 10 - Route extraction (NestJS, FastAPI, Next.js, Django) | **DONE** |
 | 11 - TS observe re-dogfood + GT audit | **DONE** |
+| 12 - Python observe dogfooding + GT | **DONE** |
+
+### Phase 12 Python Observe Dogfooding Results (2026-03-19)
+
+| Project | Precision | Recall | F1 | Status |
+|---------|-----------|--------|----|--------|
+| httpx (30 test files) | 66.7% | 6.2% | 11.4% | FAIL |
+| Requests (9 test files) | N/A | ~0% | N/A | FAIL |
+
+**Both below first-pass criteria (P>=90%, R>=80%).** Root causes: L1 `_` prefix mismatch, L2 barrel import unresolved, `src/` layout not detected. Improvement plan filed in dogfooding-results.md.
 
 ### Phase 11 Re-dogfood Results (2026-03-18)
 

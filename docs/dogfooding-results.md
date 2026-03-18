@@ -897,4 +897,71 @@ cargo build --release
 # Observe: PHP
 ./target/release/exspec observe --lang php --format json /tmp/laravel
 ./target/release/exspec observe --lang php --format json /tmp/symfony
+
+# Observe: Python
+./target/release/exspec observe --lang python --format json /tmp/httpx
+./target/release/exspec observe --lang python --format json /tmp/requests
 ```
+
+## Python Observe Dogfooding (2026-03-19)
+
+**Feature**: `exspec observe --lang python` — test-to-code mapping via static AST analysis
+**Ship criteria**: first-pass P>=90%, R>=80% (experimental label)
+
+### httpx (encode/httpx @ b5addb64)
+
+| Metric | Value |
+|--------|-------|
+| Test files | 30 |
+| Production files | 23 |
+| TP | 2 |
+| FP | 1 |
+| FN | 30 |
+| **Precision** | **66.7%** |
+| **Recall** | **6.2%** |
+| **F1** | **11.4%** |
+
+**Result: FAIL** — both P and R below first-pass criteria.
+
+#### Root Cause Analysis
+
+| Issue | Impact | FN Count |
+|-------|--------|----------|
+| L1: `_` prefix not matched (`test_decoders` vs `_decoders`) | filename convention fails | 13 |
+| L2: barrel import (`import httpx`) not resolved through `__init__.py` | import tracing misses barrel chain | 28 |
+| L1: cross-directory (`tests/client/test_client` vs `httpx/_client`) | subdirectory test files not matched | 10 |
+| FP: `tests/common.py` mapped as production file | test helper misclassified | 1 |
+
+**Key Insight**: httpx uses `import httpx` (barrel) in 93% of test files. Without barrel import resolution, only direct imports (`from httpx._urlparse import ...`) are detected. The `_` prefix convention is common in Python but observe's L1 matching doesn't strip it.
+
+#### Stratum Breakdown
+
+| Evidence | GT Pairs | TP | FN | Recall |
+|----------|----------|----|----|--------|
+| direct_import | 2 | 2 | 0 | 100.0% |
+| filename_match | 14 | 1 | 13 | 7.1% |
+| symbol_assertion | 31 | 1 | 30 | 3.2% |
+
+### Requests (psf/requests, latest main)
+
+| Metric | Value |
+|--------|-------|
+| Test files | 9 |
+| Production files | 18 (in `src/requests/`) |
+| Observed mappings | 3 (all test helpers, 0 production) |
+
+**Result: FAIL** — `src/` layout completely invisible to observe.
+
+- observe found 0 production files in `src/requests/`
+- Only detected `tests/compat.py`, `tests/utils.py`, `tests/testserver/server.py` as production files
+- Root cause: observe doesn't traverse `src/` layout as production root
+
+### Improvement Plan (separate cycle)
+
+| Priority | Fix | Expected Impact |
+|----------|-----|-----------------|
+| P0 | L1: strip `_` prefix in filename convention matching | +13 httpx FN recovered |
+| P0 | L2: barrel import resolution (`__init__.py` → re-exported modules) | +28 httpx FN recovered |
+| P1 | L1: cross-directory stem matching (ignore test subdirectory) | +10 httpx FN recovered |
+| P1 | `src/` layout detection as production root | Requests entirely fixed |
+| P2 | Test helper exclusion (files in test dirs that aren't test files) | -1 httpx FP |
