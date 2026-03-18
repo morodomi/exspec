@@ -18,6 +18,9 @@ static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 const CFG_TEST_QUERY: &str = include_str!("../queries/cfg_test.scm");
 static CFG_TEST_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
+const EXPORTED_SYMBOL_QUERY: &str = include_str!("../queries/exported_symbol.scm");
+static EXPORTED_SYMBOL_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+
 fn rust_language() -> tree_sitter::Language {
     tree_sitter_rust::LANGUAGE.into()
 }
@@ -333,6 +336,42 @@ impl ObserveExtractor for RustExtractor {
 
     fn is_non_sut_helper(&self, file_path: &str, is_known_production: bool) -> bool {
         is_non_sut_helper(file_path, is_known_production)
+    }
+
+    fn file_exports_any_symbol(&self, path: &Path, symbols: &[String]) -> bool {
+        if symbols.is_empty() {
+            return true;
+        }
+        // Optimistic fallback on read/parse failure (matches core default and Python).
+        // FN avoidance is preferred over FP avoidance here.
+        let source = match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(_) => return true,
+        };
+        let mut parser = Self::parser();
+        let tree = match parser.parse(&source, None) {
+            Some(t) => t,
+            None => return true,
+        };
+        let query = cached_query(&EXPORTED_SYMBOL_QUERY_CACHE, EXPORTED_SYMBOL_QUERY);
+        let symbol_idx = query
+            .capture_index_for_name("symbol_name")
+            .expect("@symbol_name capture not found in exported_symbol.scm");
+
+        let source_bytes = source.as_bytes();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if cap.index == symbol_idx {
+                    let name = cap.node.utf8_text(source_bytes).unwrap_or("");
+                    if symbols.iter().any(|s| s == name) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -1724,6 +1763,136 @@ mod tests {
             symbol_entry.is_some(),
             "Expected symbols=[\"Exported\"] entry for pub use internal::Exported, got: {:?}",
             result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-01: pub fn match
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_01_pub_fn_match() {
+        // Given: a file with pub fn create_user
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/exported_pub_symbols.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["create_user".to_string()];
+
+        // When: file_exports_any_symbol is called
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns true
+        assert!(result, "Expected true for pub fn create_user");
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-02: pub struct match
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_02_pub_struct_match() {
+        // Given: a file with pub struct User
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/exported_pub_symbols.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["User".to_string()];
+
+        // When: file_exports_any_symbol is called
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns true
+        assert!(result, "Expected true for pub struct User");
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-03: non-existent symbol
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_03_nonexistent_symbol() {
+        // Given: a file without NonExistent symbol
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/exported_pub_symbols.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["NonExistent".to_string()];
+
+        // When: file_exports_any_symbol is called
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns false
+        assert!(!result, "Expected false for NonExistent symbol");
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-04: file with no pub symbols
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_04_no_pub_symbols() {
+        // Given: a file with no pub items
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/no_pub_symbols.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["internal_only".to_string()];
+
+        // When: file_exports_any_symbol is called
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns false
+        assert!(!result, "Expected false for file with no pub symbols");
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-05: pub use/mod only (no direct pub definitions)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_05_pub_use_mod_only() {
+        // Given: a file with only pub use and pub mod (barrel re-exports)
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/pub_use_only.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["Foo".to_string()];
+
+        // When: file_exports_any_symbol is called
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns false (pub use/mod are handled by barrel resolution)
+        assert!(
+            !result,
+            "Expected false for pub use/mod only file (barrel resolution handles these)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-06: empty symbol list
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_06_empty_symbols() {
+        // Given: any file
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/rust/observe/exported_pub_symbols.rs");
+        let extractor = RustExtractor::new();
+        let symbols: Vec<String> = vec![];
+
+        // When: file_exports_any_symbol is called with empty symbols
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+
+        // Then: returns true (short-circuit)
+        assert!(result, "Expected true for empty symbol list");
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-07: non-existent file (optimistic fallback)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_07_nonexistent_file() {
+        // Given: a non-existent file path
+        let path = PathBuf::from("/nonexistent/path/to/file.rs");
+        let extractor = RustExtractor::new();
+        let symbols = vec!["Foo".to_string()];
+
+        // When: file_exports_any_symbol is called
+        // Then: returns true (optimistic fallback, matches core default and Python)
+        let result = extractor.file_exports_any_symbol(&path, &symbols);
+        assert!(
+            result,
+            "Expected true for non-existent file (optimistic fallback)"
         );
     }
 }
