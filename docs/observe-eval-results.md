@@ -1,16 +1,23 @@
 # Observe Precision Evaluation Results
 
-## Summary
+## Summary (Phase 11 re-dogfood, 2026-03-18)
 
-| Metric | Value |
-|--------|-------|
-| TP (correct predictions) | 155 |
-| FP (incorrect predictions) | 1 |
-| FN (missed ground truth) | 11 |
-| Ignored (secondary targets) | 183 |
-| Precision | 99.4% |
-| Recall | 93.4% |
-| F1 Score | 96.3% |
+| Metric | Phase 8b | Phase 11 (separate) | Phase 11 (root) |
+|--------|----------|--------------------|--------------------|
+| TP | 155 | 151 | 159 |
+| FP | 1 | 0 | 10 |
+| FN | 11 | 15 | 7 |
+| Ignored (secondary) | 183 | 178 | 212 |
+| Precision | 99.4% | 100.0% | 94.1% |
+| Recall | 93.4% | 91.0% | 95.8% |
+| F1 | 96.3% | 95.2% | 94.9% |
+
+Notes:
+- Phase 11 "separate" = `exspec observe` run separately on packages/common and packages/core
+- Phase 11 "root" = `exspec observe` run on project root (includes cross-package resolution)
+- 12 FP from Phase 8b methodology were reclassified as secondary targets after audit
+- Phase 8b FP=1 (parse-int.pipe.ts) was also reclassified as secondary
+- FN difference (separate vs root): cross-package imports (B2) only resolve in root mode
 
 ## Stratum Breakdown
 
@@ -185,25 +192,45 @@
 | packages/core/test/scanner.spec.ts | packages/core/scanner.ts |
 | packages/core/test/services/reflector.service.spec.ts | packages/core/services/reflector.service.ts |
 
-## False Positives
+## False Positives (Phase 11, separate)
 
-| Test File | Production File |
-|-----------|-----------------|
-| packages/common/test/decorators/route-params.decorator.spec.ts | packages/common/pipes/parse-int.pipe.ts |
+None (0 FP after GT secondary target audit).
 
-## False Negatives
+Previous Phase 8b FP (1 pair: parse-int.pipe.ts) was reclassified as secondary target.
 
-| Test File | Production File | Evidence |
-|-----------|-----------------|----------|
-| packages/common/test/exceptions/http.exception.spec.ts | packages/common/exceptions/bad-request.exception.ts | barrel_import, constructor_usage, symbol_assertion |
-| packages/common/test/exceptions/http.exception.spec.ts | packages/common/exceptions/http.exception.ts | barrel_import, constructor_usage, filename_match, symbol_assertion, test_name_match |
-| packages/core/test/injector/helpers/provider-classifier.spec.ts | packages/common/interfaces/modules/provider.interface.ts | barrel_import, call_usage, symbol_assertion, test_name_match |
-| packages/core/test/injector/helpers/silent-logger.spec.ts | packages/common/services/logger.service.ts | barrel_import, call_usage, symbol_assertion, test_name_match |
-| packages/core/test/injector/instance-wrapper.spec.ts | packages/common/interfaces/scope-options.interface.ts | barrel_import, call_usage, symbol_assertion, test_name_match |
-| packages/core/test/inspector/serialized-graph.spec.ts | packages/core/inspector/interfaces/edge.interface.ts | call_usage, direct_import, test_name_match |
-| packages/core/test/inspector/serialized-graph.spec.ts | packages/core/inspector/interfaces/node.interface.ts | call_usage, direct_import, symbol_assertion, test_name_match |
-| packages/core/test/pipes/params-token-factory.spec.ts | packages/common/enums/route-paramtypes.enum.ts | direct_import, symbol_assertion, test_name_match |
-| packages/core/test/router/route-params-factory.spec.ts | packages/common/enums/route-paramtypes.enum.ts | direct_import, symbol_assertion, test_name_match |
-| packages/core/test/router/router-response-controller.spec.ts | packages/common/enums/request-method.enum.ts | barrel_import, symbol_assertion, test_name_match |
-| packages/core/test/scanner.spec.ts | packages/common/decorators/core/injectable.decorator.ts | barrel_import, call_usage, symbol_assertion, test_name_match |
+## False Negatives (Phase 11, separate: 15)
+
+| Test File | Production File | Boundary | Evidence |
+|-----------|-----------------|----------|----------|
+| packages/common/test/exceptions/http.exception.spec.ts | packages/common/exceptions/bad-request.exception.ts | B4 barrel | barrel_import, constructor_usage, symbol_assertion |
+| packages/common/test/exceptions/http.exception.spec.ts | packages/common/exceptions/http.exception.ts | B4 barrel | barrel_import, constructor_usage, filename_match, symbol_assertion, test_name_match |
+| packages/core/test/injector/helpers/provider-classifier.spec.ts | packages/common/interfaces/modules/provider.interface.ts | B2+B4 | barrel_import, call_usage, symbol_assertion, test_name_match |
+| packages/core/test/injector/helpers/silent-logger.spec.ts | packages/common/services/logger.service.ts | B2 | barrel_import, call_usage, symbol_assertion, test_name_match |
+| packages/core/test/injector/injector.spec.ts | packages/common/decorators/core/inject.decorator.ts | B2 | call_usage, direct_import, test_name_match |
+| packages/core/test/injector/injector.spec.ts | packages/common/decorators/core/injectable.decorator.ts | B2 | call_usage, direct_import, test_name_match |
+| packages/core/test/injector/instance-loader.spec.ts | packages/common/decorators/core/controller.decorator.ts | B2 | call_usage, direct_import, symbol_assertion, test_name_match |
+| packages/core/test/injector/instance-loader.spec.ts | packages/common/decorators/core/injectable.decorator.ts | B2 | barrel_import, call_usage, symbol_assertion, test_name_match |
+| packages/core/test/injector/instance-wrapper.spec.ts | packages/common/interfaces/scope-options.interface.ts | B2+B4 | barrel_import, call_usage, symbol_assertion, test_name_match |
+| packages/core/test/pipes/params-token-factory.spec.ts | packages/common/enums/route-paramtypes.enum.ts | B2+B4 | direct_import, symbol_assertion, test_name_match |
+| packages/core/test/router/route-params-factory.spec.ts | packages/common/enums/route-paramtypes.enum.ts | B2+B4 | direct_import, symbol_assertion, test_name_match |
+| packages/core/test/router/router-response-controller.spec.ts | packages/common/enums/request-method.enum.ts | B2+B4 | barrel_import, symbol_assertion, test_name_match |
+| packages/core/test/scanner.spec.ts | packages/common/decorators/core/controller.decorator.ts | B2 | call_usage, direct_import, provider_registration, symbol_assertion |
+| packages/core/test/scanner.spec.ts | packages/common/decorators/core/injectable.decorator.ts | B2 | barrel_import, call_usage, symbol_assertion, test_name_match |
+| packages/core/test/scanner.spec.ts | packages/common/decorators/modules/module.decorator.ts | B2 | call_usage, direct_import, provider_registration, symbol_assertion, test_name_match |
+
+### FN Boundary Summary
+
+| Boundary | Count | Description |
+|----------|-------|-------------|
+| B2 (cross-package) | 8 | packages/core tests -> packages/common targets |
+| B2+B4 (cross-package enum/interface) | 5 | Cross-package enum/interface imports |
+| B4 barrel (same-package) | 2 | Barrel `export *` filtering all .exception.ts files |
+
+### Phase 8b -> Phase 11 Changes
+
+| Change | Count | Details |
+|--------|-------|---------|
+| Fixed FN (now TP) | 2 | serialized-graph.spec.ts -> edge.interface.ts, node.interface.ts |
+| New FN (regression) | 6 | injector.spec.ts (2), instance-loader.spec.ts (2), scanner.spec.ts (2) — all B2 cross-package |
+| Reclassified FP -> secondary | 12 | Phase 11 GT audit found 12 legitimate secondary targets |
 

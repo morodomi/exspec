@@ -2,7 +2,7 @@
 
 ## Current Phase
 
-v0.2.0 released to crates.io. observe subcommand (TypeScript PoC) shipped. Lint reliability improvements (Phase 8a) and workspace consolidation complete. 13 projects / 4 languages / ~45k tests dogfooded. 17 active rules, 4 languages.
+v0.3.0 development. observe TypeScript: P=100%, R=91% (separate packages), route extraction for 4 frameworks. Lint: 17 active rules, 4 languages, 13 projects / ~45k tests dogfooded.
 
 ## Progress
 
@@ -34,17 +34,27 @@ v0.2.0 released to crates.io. observe subcommand (TypeScript PoC) shipped. Lint 
 | 8c-2 - observe MVP ship (README, ship criteria) | **DONE** |
 | 8c-3 - tsconfig path resolution | **DONE** |
 | 8c-4 - context-aware enum/interface filter | **DONE** |
+| 10 - Route extraction (NestJS, FastAPI, Next.js, Django) | **DONE** |
+| 11 - TS observe re-dogfood + GT audit | **DONE** |
 
-### Phase 8b Final Results
+### Phase 11 Re-dogfood Results (2026-03-18)
 
-observe PoC validated on 2 repositories. Static AST-only test-to-code mapping is viable for TypeScript projects with barrel imports.
+NestJS ground truth re-validated after Phase 8c/10 changes. 12 FP reclassified as legitimate secondary targets.
+
+| Scope | Precision | Recall | F1 | FP | FN |
+|-------|-----------|--------|----|----|-----|
+| Separate packages (common + core) | 100.0% | 91.0% | 95.2% | 0 | 15 |
+| Root (full monorepo) | 94.1% | 95.8% | 94.9% | 10 | 7 |
+| typeorm (50-pair spot-check) | 100% | -- | -- | 0 | -- |
+
+Remaining FN (separate): B2 cross-package (8), B2+B4 cross-package enum/interface (5), B4 same-package barrel (2).
+Root mode resolves most B2 FN but introduces FP from peripheral imports not yet in GT.
+
+### Phase 8b Historical Results (for reference)
 
 | Repository | Precision | Recall | F1 | FP | FN |
 |------------|-----------|--------|----|----|-----|
 | nestjs/nest (GT complete) | 99.4% | 93.4% | 96.3% | 1 | 11 |
-| typeorm (50-pair spot-check) | 100% | -- | -- | 0 | -- |
-
-Remaining FN (NestJS): cross-package barrel (7), interface/enum filter via barrel (partial, see B4). B1 (namespace re-export) resolved in PR #102.
 
 ## Supported Languages
 

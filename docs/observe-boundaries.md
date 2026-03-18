@@ -70,7 +70,7 @@ Namespace re-export (`export * as Ns from`) produces a `namespace_export` AST no
 
 **Resolution (Phase 8c-4)**: `is_non_sut_helper` now accepts `is_known_production: bool`. When the resolved file is a known production file (`canonical_to_idx.contains_key()`), the suffix filter is bypassed. The `is_type_definition_file` function was extracted to encapsulate the suffix check.
 
-**Remaining limitation**: Barrel resolution path (`resolve_barrel_exports_inner`) passes `is_known_production=false` because it lacks access to the production file index. Enum/interface files re-exported through barrels may still be filtered before reaching `collect_matches`. This is a known edge case, deferred to future work.
+**Remaining limitation**: Barrel resolution path (`resolve_barrel_exports_inner`) passes `is_known_production=false` because it lacks access to the production file index. Enum/interface files re-exported through barrels may still be filtered before reaching `collect_matches`. Phase 11 analysis showed this affects only 2 FN (http.exception.spec.ts). Barrel fix was rejected because `export *` barrels would resolve 20+ files per barrel, likely increasing FP more than reducing FN. The dominant FN source is B2 (cross-package), not B4.
 
 **Tests**: `boundary_b4_enum_primary_target_filtered` (TP), `boundary_b4_interface_primary_target_filtered` (TP)
 

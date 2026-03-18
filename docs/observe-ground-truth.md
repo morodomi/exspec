@@ -261,6 +261,14 @@ See `docs/observe-gt-guideline.md` for full classification rules.
 | packages/core/test/router/router-execution-context.spec.ts | Added handler-metadata-storage.ts, sse-stream.ts to secondary (type casts only) | FP audit (14 pairs) |
 | packages/core/test/router/router-explorer.spec.ts | Added execution-context-host.ts to secondary (expected-value token) | FP audit (14 pairs) |
 | packages/core/test/router/router-response-controller.spec.ts | Added sse-stream.ts to secondary (stub target class) | FP audit (14 pairs) |
+| packages/common/test/decorators/route-params.decorator.spec.ts | Added request-method.enum.ts, parse-int.pipe.ts to secondary (value comparison, decorator arg) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/application-config.spec.ts | Added exclude-route-metadata.interface.ts to secondary (type parameter) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/exceptions/exceptions-handler.spec.ts | Added invalid-exception-filter.exception.ts to secondary (throw assertion target) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/injector/container.spec.ts | Added circular-dependency.exception.ts, unknown-module.exception.ts to secondary (throw assertion targets) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/injector/module.spec.ts | Added unknown-element.exception.ts, unknown-export.exception.ts to secondary (throw assertion targets) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/inspector/graph-inspector.spec.ts | Added enhancer-metadata-cache-entry.interface.ts to secondary (type annotation + object construction) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/router/router-explorer.spec.ts | Added unknown-request-mapping.exception.ts, route-path-metadata.interface.ts to secondary (throw assertion, type annotation) | Phase 11 re-dogfood (12 pairs) |
+| packages/core/test/scanner.spec.ts | Added module-override.interface.ts to secondary (type annotation + value construction) | Phase 11 re-dogfood (12 pairs) |
 
 ### Audit Coverage by Stratum
 
@@ -279,12 +287,16 @@ See `docs/observe-gt-guideline.md` for full classification rules.
 - **Layer 1 (directory matching)**: Expected 0 matches.
   All tests are in separate `test/` directories.
 - **Layer 2 (import tracing)**: Primary evaluation target.
-  Direct imports should resolve; barrel imports depend on exspec's resolution depth.
+  Direct imports should resolve; barrel imports partially supported (Phase 8b+).
 - **Barrel imports**: 197 symbols resolved through barrels via ts-morph.
-  exspec's `resolve_import_path` does not follow `index.ts` re-exports.
-  These are expected FN unless exspec adds barrel support.
-- **@nestjs/* imports**: Resolved via tsconfig.json paths mapping.
-  exspec does not read tsconfig paths, so these are expected FN.
+  exspec supports barrel resolution (Phase 8b), including `export *` and named re-exports.
+  Remaining barrel FN: `http.exception.spec.ts` imports through `../../exceptions` barrel
+  where all re-exported files are `.exception.ts` (filtered by `is_non_sut_helper`).
+- **Cross-package imports (B2)**: Tests in `packages/core` importing from `packages/common`
+  are only resolved when observe runs on the project root (not separate packages).
+  Single-package execution misses 8-13 cross-package primary targets.
+- **@nestjs/* imports**: Partially resolved via tsconfig path alias support (Phase 8c).
+  Cross-package aliases resolve when observe runs on root.
 
 ## Machine-Readable Data
 
@@ -559,7 +571,9 @@ See `docs/observe-gt-guideline.md` for full classification rules.
       ],
       "secondary_targets": [
         "packages/common/decorators/http/request-mapping.decorator.ts",
-        "packages/common/enums/route-paramtypes.enum.ts"
+        "packages/common/enums/route-paramtypes.enum.ts",
+        "packages/common/enums/request-method.enum.ts",
+        "packages/common/pipes/parse-int.pipe.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -1162,7 +1176,8 @@ See `docs/observe-gt-guideline.md` for full classification rules.
         "packages/core/application-config.ts"
       ],
       "secondary_targets": [
-        "packages/common/interfaces/global-prefix-options.interface.ts"
+        "packages/common/interfaces/global-prefix-options.interface.ts",
+        "packages/core/router/interfaces/exclude-route-metadata.interface.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -1299,7 +1314,8 @@ See `docs/observe-gt-guideline.md` for full classification rules.
       "secondary_targets": [
         "packages/common/exceptions/http.exception.ts",
         "packages/common/utils/shared.utils.ts",
-        "packages/core/helpers/execution-context-host.ts"
+        "packages/core/helpers/execution-context-host.ts",
+        "packages/core/errors/exceptions/invalid-exception-filter.exception.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -1673,7 +1689,9 @@ See `docs/observe-gt-guideline.md` for full classification rules.
       "secondary_targets": [
         "packages/core/middleware/container.ts",
         "packages/common/decorators/modules/module.decorator.ts",
-        "packages/common/decorators/modules/global.decorator.ts"
+        "packages/common/decorators/modules/global.decorator.ts",
+        "packages/core/errors/exceptions/circular-dependency.exception.ts",
+        "packages/core/errors/exceptions/unknown-module.exception.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -1898,7 +1916,9 @@ See `docs/observe-gt-guideline.md` for full classification rules.
         "packages/common/interfaces/scope-options.interface.ts",
         "packages/common/decorators/modules/module.decorator.ts",
         "packages/core/injector/container.ts",
-        "packages/common/decorators/core/injectable.decorator.ts"
+        "packages/common/decorators/core/injectable.decorator.ts",
+        "packages/core/errors/exceptions/unknown-element.exception.ts",
+        "packages/core/errors/exceptions/unknown-export.exception.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -1983,7 +2003,8 @@ See `docs/observe-gt-guideline.md` for full classification rules.
       ],
       "secondary_targets": [
         "packages/core/injector/container.ts",
-        "packages/core/inspector/serialized-graph.ts"
+        "packages/core/inspector/serialized-graph.ts",
+        "packages/core/inspector/interfaces/enhancer-metadata-cache-entry.interface.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -2616,7 +2637,9 @@ See `docs/observe-gt-guideline.md` for full classification rules.
         "packages/core/router/route-path-factory.ts",
         "packages/core/router/router-exception-filters.ts",
         "packages/common/decorators/http/request-mapping.decorator.ts",
-        "packages/core/helpers/execution-context-host.ts"
+        "packages/core/helpers/execution-context-host.ts",
+        "packages/core/errors/exceptions/unknown-request-mapping.exception.ts",
+        "packages/core/router/interfaces/route-path-metadata.interface.ts"
       ],
       "confidence": "high",
       "evidence": {
@@ -2776,7 +2799,8 @@ See `docs/observe-gt-guideline.md` for full classification rules.
         "packages/core/inspector/graph-inspector.ts",
         "packages/core/metadata-scanner.ts",
         "packages/common/decorators/core/catch.decorator.ts",
-        "packages/common/interfaces/scope-options.interface.ts"
+        "packages/common/interfaces/scope-options.interface.ts",
+        "packages/core/interfaces/module-override.interface.ts"
       ],
       "confidence": "high",
       "evidence": {

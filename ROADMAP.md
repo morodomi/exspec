@@ -9,19 +9,29 @@
 
 ## Now
 
+(no active phase)
+
+## Completed Recently
+
+### Phase 11: TS observe re-dogfood + GT audit (2026-03-18)
+
+Goal: Re-validate NestJS ground truth after Phase 8c/10 changes. Measure actual Precision/Recall.
+
+**Results**: P=100%, R=91.0% (separate packages, after GT audit). 12 FP reclassified as legitimate secondary targets. B4 barrel fix deemed unnecessary — FN are dominantly B2 (cross-package), not B4.
+
+**Why**: Phase 8c fixes improved barrel/import resolution but also introduced peripheral file mappings. Re-dogfood confirmed observe meets ship criteria (P>=98%, R>=90%) when GT accounts for all legitimate secondary targets.
+
+**Decision**: B4 barrel fix NOT implemented. Reason: (1) only 2 FN are same-package B4; (2) fixing would resolve .exception.ts through barrels, likely adding more FP than TP gained; (3) 13/15 FN are B2 cross-package, fixable only with multi-path CLI support.
+
 ### Phase 10: observe route extraction
 
-Goal: Extract API route definitions from framework decorators/config and map them to tests. Output: "which routes have tests, which don't?"
-
-**Why now**: observe multi-language (Phase 9) is complete. Route extraction is the next differentiator — no existing tool shows "this API endpoint has 0 tests" via static analysis.
-
-**Scope**: NestJS (`@Get/@Post` decorators) first, then Django (URL conf), FastAPI (`@app.get`). TypeScript route extraction already exists as PoC in observe.
+Goal: Extract API route definitions from framework decorators/config. NestJS, FastAPI, Next.js App Router, Django URL conf.
 
 ## Next
 
 | Priority | Task | Trigger |
 |----------|------|---------|
-| P1 | TypeScript observe precision (#85 namespace re-export, cross-package barrel) | When FN reports come in |
+| P1 | Multi-path CLI for observe (B2 cross-package resolution) | 13 FN in NestJS, all B2 |
 | P2 | `exspec init` (framework detection + auto-config) | User onboarding friction |
 
 ## Backlog
@@ -56,12 +66,18 @@ Goal: Extract API route definitions from framework decorators/config and map the
 - **Success bar**: Precision >= 90%, Recall >= 80% per language (lower than TypeScript's 98%/90% due to first-pass nature). observe の低精度出力は lint の FP よりユーザー影響が大きい（「テストされていない」という誤情報）。first-pass 言語は出力に `[experimental]` マーカーを付与し、精度が ship criteria (P>=98%, R>=90%) を超えた言語から stable に昇格する
 - **Phase 9 completion**: CONSTITUTION.md Section 8 (Scope Boundaries) の observe 欄を更新する。CONSTITUTION 変更は Human approval 必須 (Section 5)
 
-### observe PoC success (Phase 8b-8c)
+### B4 barrel fix rejection (Phase 11)
 
-- TypeScript observe validated on NestJS (F1 96.3%) and typeorm (Precision 100% spot-check)
+- **Why not fix**: B4 same-package barrel FN is only 2 pairs (http.exception.spec.ts). Fixing barrel resolution to include .exception.ts files would likely increase FP (barrel `export *` would resolve 20+ exception files per barrel). Net precision impact: negative.
+- **Root cause of FN**: 13/15 FN are B2 (cross-package), not B4. The real fix is multi-path CLI support.
+- **GT audit**: 12 apparent FP were legitimate secondary targets missed in earlier audits. After correction, P=100% (separate mode).
+
+### observe PoC success (Phase 8b-8c, updated Phase 11)
+
+- TypeScript observe validated on NestJS: P=100%, R=91.0% (separate), P=94.1%, R=95.8% (root)
 - Static AST-only test-to-code mapping is viable -- no existing tool does this
 - Product narrative: "AI generates code -> exspec lint for quality -> exspec observe for gap discovery"
-- Ship criteria: Precision >= 98%, Recall >= 90% (TypeScript exceeds both)
+- Ship criteria: Precision >= 98%, Recall >= 90% (TypeScript meets both in separate mode)
 
 ### T104 removal (Phase 5.5)
 
