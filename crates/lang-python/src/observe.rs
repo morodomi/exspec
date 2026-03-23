@@ -929,6 +929,9 @@ impl PythonExtractor {
             let mut all_matched = HashSet::<usize>::new();
             // idx_to_symbols: tracks which import symbols caused each idx match
             let mut idx_to_symbols: HashMap<usize, HashSet<String>> = HashMap::new();
+            // direct_import_indices: indices resolved via non-barrel L2 absolute import
+            // These bypass the assertion filter because `from pkg._sub import X` is a strong signal
+            let mut direct_import_indices: HashSet<usize> = HashSet::new();
 
             for import in &imports {
                 // Handle bare relative imports: `from . import X` (specifier="./")
@@ -1031,6 +1034,9 @@ impl PythonExtractor {
                     {
                         continue;
                     }
+                    // Direct (non-barrel) import: bypasses assertion filter (L1080)
+                    // to avoid FN when test imports sub-module directly.
+                    let is_direct = !self.is_barrel_file(&resolved);
                     let before = all_matched.clone();
                     exspec_core::observe::collect_import_matches(
                         self,
@@ -1041,6 +1047,12 @@ impl PythonExtractor {
                         &canonical_root,
                     );
                     track_new_matches(&all_matched, &before, symbols, &mut idx_to_symbols);
+                    // Track direct (non-barrel) absolute import matches for assertion filter bypass
+                    if is_direct {
+                        for &idx in all_matched.difference(&before) {
+                            direct_import_indices.insert(idx);
+                        }
+                    }
                 }
             }
 
@@ -1065,7 +1077,10 @@ impl PythonExtractor {
                     // Assertions exist but no import symbol intersects -> safe fallback (PY-AF-06b, PY-AF-09)
                     all_matched.clone()
                 } else {
-                    asserted_matched
+                    // Include direct import indices regardless of assertion filter
+                    let mut final_set = asserted_matched;
+                    final_set.extend(direct_import_indices.intersection(&all_matched).copied());
+                    final_set
                 }
             };
 
@@ -5274,6 +5289,248 @@ class TestMyModel(unittest.TestCase):
         assert!(
             !resolved.contains("__init__"),
             "should NOT resolve to __init__.py, got: {resolved}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SUBMOD-01: direct import + barrel coexist, assertion filter bypass
+    //
+    // `from pkg._urlparse import normalize` is a direct import to _urlparse.py.
+    // Even though `normalize` does not appear in `assert pkg.URL(...)`,
+    // _urlparse.py SHOULD be mapped because it was directly imported (not via barrel).
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_submod_01_direct_import_bypasses_assertion_filter() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        // Given: pkg/_urlparse.py, pkg/_client.py, pkg/__init__.py (re-exports _client only)
+        //        tests/test_whatwg.py:
+        //          from pkg._urlparse import normalize   <- direct import (not in assertion)
+        //          import pkg                            <- barrel import
+        //          def test_url():
+        //              assert pkg.URL("http://example.com")  <- assertion uses URL (from _client)
+        let dir = TempDir::new().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(pkg.join("_urlparse.py"), "def normalize(url): return url\n").unwrap();
+        std::fs::write(pkg.join("_client.py"), "class URL:\n    pass\n").unwrap();
+        // __init__.py re-exports _client only (NOT _urlparse)
+        std::fs::write(pkg.join("__init__.py"), "from ._client import URL\n").unwrap();
+
+        let test_content = "from pkg._urlparse import normalize\nimport pkg\n\ndef test_url():\n    assert pkg.URL(\"http://example.com\")\n";
+        std::fs::write(tests_dir.join("test_whatwg.py"), test_content).unwrap();
+
+        let urlparse_path = pkg.join("_urlparse.py").to_string_lossy().into_owned();
+        let client_path = pkg.join("_client.py").to_string_lossy().into_owned();
+        let test_path = tests_dir
+            .join("test_whatwg.py")
+            .to_string_lossy()
+            .into_owned();
+
+        let extractor = PythonExtractor::new();
+        let production_files = vec![urlparse_path.clone(), client_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: _urlparse.py IS mapped (direct import bypasses assertion filter)
+        let urlparse_mapped = result
+            .iter()
+            .find(|m| m.production_file == urlparse_path)
+            .map(|m| m.test_files.contains(&test_path))
+            .unwrap_or(false);
+        assert!(
+            urlparse_mapped,
+            "pkg/_urlparse.py should be mapped via direct import (assertion filter bypass). mappings={:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SUBMOD-02: un-re-exported sub-module with direct import
+    //
+    // `from pkg._internal import helper` imports a module that is NOT in __init__.py.
+    // Since it is directly imported and helper() appears in assertion, _internal.py SHOULD be mapped.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_submod_02_unre_exported_direct_import_mapped() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        // Given: pkg/_internal.py (NOT in __init__.py), tests/test_internal.py:
+        //          from pkg._internal import helper
+        //          def test_it():
+        //              assert helper()
+        let dir = TempDir::new().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(pkg.join("_internal.py"), "def helper(): return True\n").unwrap();
+        // __init__.py does NOT re-export _internal
+        std::fs::write(pkg.join("__init__.py"), "# empty barrel\n").unwrap();
+
+        let test_content =
+            "from pkg._internal import helper\n\ndef test_it():\n    assert helper()\n";
+        std::fs::write(tests_dir.join("test_internal.py"), test_content).unwrap();
+
+        let internal_path = pkg.join("_internal.py").to_string_lossy().into_owned();
+        let test_path = tests_dir
+            .join("test_internal.py")
+            .to_string_lossy()
+            .into_owned();
+
+        let extractor = PythonExtractor::new();
+        let production_files = vec![internal_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: _internal.py IS mapped
+        let internal_mapped = result
+            .iter()
+            .find(|m| m.production_file == internal_path)
+            .map(|m| m.test_files.contains(&test_path))
+            .unwrap_or(false);
+        assert!(
+            internal_mapped,
+            "pkg/_internal.py should be mapped via direct import. mappings={:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SUBMOD-03: nested sub-module direct import
+    //
+    // `from pkg._internal._helpers import util` imports a nested sub-module.
+    // _helpers.py SHOULD be mapped.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_submod_03_nested_submodule_direct_import_mapped() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        // Given: pkg/_internal/_helpers.py, tests/test_helpers.py:
+        //          from pkg._internal._helpers import util
+        //          def test_util():
+        //              assert util()
+        let dir = TempDir::new().unwrap();
+        let pkg = dir.path().join("pkg");
+        let internal = pkg.join("_internal");
+        std::fs::create_dir_all(&internal).unwrap();
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(internal.join("_helpers.py"), "def util(): return True\n").unwrap();
+        std::fs::write(internal.join("__init__.py"), "# empty\n").unwrap();
+        std::fs::write(pkg.join("__init__.py"), "# empty barrel\n").unwrap();
+
+        let test_content =
+            "from pkg._internal._helpers import util\n\ndef test_util():\n    assert util()\n";
+        std::fs::write(tests_dir.join("test_helpers.py"), test_content).unwrap();
+
+        let helpers_path = internal.join("_helpers.py").to_string_lossy().into_owned();
+        let test_path = tests_dir
+            .join("test_helpers.py")
+            .to_string_lossy()
+            .into_owned();
+
+        let extractor = PythonExtractor::new();
+        let production_files = vec![helpers_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: _helpers.py IS mapped
+        let helpers_mapped = result
+            .iter()
+            .find(|m| m.production_file == helpers_path)
+            .map(|m| m.test_files.contains(&test_path))
+            .unwrap_or(false);
+        assert!(
+            helpers_mapped,
+            "pkg/_internal/_helpers.py should be mapped via nested direct import. mappings={:?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PY-SUBMOD-04: regression — barrel-only import still filtered by assertion
+    //
+    // `import pkg` + `assert pkg.Config()` → _config.py IS mapped.
+    // `import pkg` + no assertion on Model → _models.py is NOT mapped.
+    // Assertion filter continues to work for barrel imports.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_submod_04_regression_barrel_only_assertion_filter_preserved() {
+        use std::collections::HashMap;
+        use tempfile::TempDir;
+
+        // Given: pkg/_config.py, pkg/_models.py, pkg/__init__.py (re-exports both)
+        //        tests/test_foo.py:
+        //          import pkg
+        //          def test_foo():
+        //              assert pkg.Config()   <- assertion uses Config (from _config.py)
+        //                                   <- no assertion on Model (from _models.py)
+        let dir = TempDir::new().unwrap();
+        let pkg = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg).unwrap();
+        let tests_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(pkg.join("_config.py"), "class Config:\n    pass\n").unwrap();
+        std::fs::write(pkg.join("_models.py"), "class Model:\n    pass\n").unwrap();
+        // __init__.py re-exports both
+        std::fs::write(
+            pkg.join("__init__.py"),
+            "from ._config import Config\nfrom ._models import Model\n",
+        )
+        .unwrap();
+
+        let test_content = "import pkg\n\ndef test_foo():\n    assert pkg.Config()\n";
+        std::fs::write(tests_dir.join("test_foo.py"), test_content).unwrap();
+
+        let config_path = pkg.join("_config.py").to_string_lossy().into_owned();
+        let models_path = pkg.join("_models.py").to_string_lossy().into_owned();
+        let test_path = tests_dir.join("test_foo.py").to_string_lossy().into_owned();
+
+        let extractor = PythonExtractor::new();
+        let production_files = vec![config_path.clone(), models_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result =
+            extractor.map_test_files_with_imports(&production_files, &test_sources, dir.path());
+
+        // Then: _models.py is NOT mapped (barrel import, assertion filter still applies)
+        let models_not_mapped = result
+            .iter()
+            .find(|m| m.production_file == models_path)
+            .map(|m| !m.test_files.contains(&test_path))
+            .unwrap_or(true);
+        assert!(
+            models_not_mapped,
+            "pkg/_models.py should NOT be mapped (barrel import, no assertion on Model). mappings={:?}",
+            result
         );
     }
 }
