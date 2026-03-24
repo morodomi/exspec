@@ -409,6 +409,19 @@ impl ObserveExtractor for RustExtractor {
                 }
             }
         }
+        // Fallback: check for pub items inside cfg macros (token_tree is opaque to tree-sitter)
+        // Line-by-line scan to skip comments (avoids matching `// pub struct Foo`)
+        for symbol in symbols {
+            for keyword in &["struct", "fn", "type", "enum", "trait", "const", "static"] {
+                let pattern = format!("pub {keyword} {symbol}");
+                if source.lines().any(|line| {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("//") && trimmed.contains(&pattern)
+                }) {
+                    return true;
+                }
+            }
+        }
         false
     }
 }
@@ -769,7 +782,8 @@ fn parse_use_path(path: &str, result: &mut HashMap<String, Vec<String>>) {
 /// Extract `pub mod` and `pub use` re-exports from raw text (e.g., inside cfg macro token_tree).
 /// Uses text matching since tree-sitter token_tree content is not structured AST.
 fn extract_re_exports_from_text(text: &str, result: &mut Vec<BarrelReExport>) {
-    for line in text.lines() {
+    let joined = join_multiline_pub_use(text);
+    for line in joined.lines() {
         let trimmed = line.trim();
         // Skip token_tree boundary lines (bare `{` or `}`)
         if trimmed == "{" || trimmed == "}" {
@@ -783,80 +797,93 @@ fn extract_re_exports_from_text(text: &str, result: &mut Vec<BarrelReExport>) {
             .unwrap_or(trimmed)
             .trim();
 
-        // pub mod foo; or pub(crate) mod foo;
-        if (trimmed.starts_with("pub mod ") || trimmed.starts_with("pub(crate) mod "))
-            && trimmed.ends_with(';')
-        {
-            let mod_name = trimmed
-                .trim_start_matches("pub(crate) mod ")
-                .trim_start_matches("pub mod ")
-                .trim_end_matches(';')
-                .trim();
-            if !mod_name.is_empty() && !mod_name.contains(' ') {
-                result.push(BarrelReExport {
-                    symbols: Vec::new(),
-                    from_specifier: format!("./{mod_name}"),
-                    wildcard: true,
-                    namespace_wildcard: false,
-                });
-            }
+        // A single token_tree line may contain multiple statements: "pub mod tcp; pub use ...;"
+        // Split by ';' and process each statement individually.
+        // We do not split inside braces (e.g. pub use mod::{A, B}) — but such content
+        // never contains ';' inside the brace list, so a simple split is safe.
+        let statements: Vec<&str> = trimmed
+            .split(';')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        for stmt in statements {
+            extract_single_re_export_stmt(stmt, result);
         }
+    }
+}
 
-        // pub use module::{A, B}; or pub use module::*;
-        if trimmed.starts_with("pub use ") && trimmed.contains("::") {
-            let use_path = trimmed
-                .trim_start_matches("pub use ")
-                .trim_end_matches(';')
-                .trim();
-            let use_path = use_path.strip_prefix("self::").unwrap_or(use_path);
-            // pub use self::*; -> after strip, use_path = "*"
-            if use_path == "*" {
+fn extract_single_re_export_stmt(trimmed: &str, result: &mut Vec<BarrelReExport>) {
+    // pub mod foo (input is already split by ';', so no trailing semicolon)
+    if trimmed.starts_with("pub mod ") || trimmed.starts_with("pub(crate) mod ") {
+        let mod_name = trimmed
+            .trim_start_matches("pub(crate) mod ")
+            .trim_start_matches("pub mod ")
+            .trim_end_matches(';')
+            .trim();
+        if !mod_name.is_empty() && !mod_name.contains(' ') {
+            result.push(BarrelReExport {
+                symbols: Vec::new(),
+                from_specifier: format!("./{mod_name}"),
+                wildcard: true,
+                namespace_wildcard: false,
+            });
+        }
+    }
+
+    // pub use module::{A, B}; or pub use module::*;
+    if trimmed.starts_with("pub use ") && trimmed.contains("::") {
+        let use_path = trimmed
+            .trim_start_matches("pub use ")
+            .trim_end_matches(';')
+            .trim();
+        let use_path = use_path.strip_prefix("self::").unwrap_or(use_path);
+        // pub use self::*; -> after strip, use_path = "*"
+        if use_path == "*" {
+            result.push(BarrelReExport {
+                symbols: Vec::new(),
+                from_specifier: "./".to_string(),
+                wildcard: true,
+                namespace_wildcard: false,
+            });
+            return;
+        }
+        // Delegate to the same text-based parsing used for tree-sitter nodes
+        if use_path.ends_with("::*") {
+            let module_part = use_path.strip_suffix("::*").unwrap_or("");
+            result.push(BarrelReExport {
+                symbols: Vec::new(),
+                from_specifier: format!("./{}", module_part.replace("::", "/")),
+                wildcard: true,
+                namespace_wildcard: false,
+            });
+        } else if let Some(brace_start) = use_path.find('{') {
+            let module_part = &use_path[..brace_start.saturating_sub(2)];
+            if let Some(brace_end) = use_path.find('}') {
+                let list_content = &use_path[brace_start + 1..brace_end];
+                let symbols: Vec<String> = list_content
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty() && s != "*")
+                    .collect();
                 result.push(BarrelReExport {
-                    symbols: Vec::new(),
-                    from_specifier: "./".to_string(),
-                    wildcard: true,
-                    namespace_wildcard: false,
-                });
-                continue;
-            }
-            // Delegate to the same text-based parsing used for tree-sitter nodes
-            if use_path.ends_with("::*") {
-                let module_part = use_path.strip_suffix("::*").unwrap_or("");
-                result.push(BarrelReExport {
-                    symbols: Vec::new(),
+                    symbols,
                     from_specifier: format!("./{}", module_part.replace("::", "/")),
-                    wildcard: true,
+                    wildcard: false,
                     namespace_wildcard: false,
                 });
-            } else if let Some(brace_start) = use_path.find('{') {
-                let module_part = &use_path[..brace_start.saturating_sub(2)];
-                if let Some(brace_end) = use_path.find('}') {
-                    let list_content = &use_path[brace_start + 1..brace_end];
-                    let symbols: Vec<String> = list_content
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty() && s != "*")
-                        .collect();
-                    result.push(BarrelReExport {
-                        symbols,
-                        from_specifier: format!("./{}", module_part.replace("::", "/")),
-                        wildcard: false,
-                        namespace_wildcard: false,
-                    });
-                }
-            } else {
-                // pub use module::Symbol;
-                let parts: Vec<&str> = use_path.split("::").collect();
-                if parts.len() >= 2 {
-                    let module_parts = &parts[..parts.len() - 1];
-                    let symbol = parts[parts.len() - 1];
-                    result.push(BarrelReExport {
-                        symbols: vec![symbol.to_string()],
-                        from_specifier: format!("./{}", module_parts.join("/")),
-                        wildcard: false,
-                        namespace_wildcard: false,
-                    });
-                }
+            }
+        } else {
+            // pub use module::Symbol;
+            let parts: Vec<&str> = use_path.split("::").collect();
+            if parts.len() >= 2 {
+                let module_parts = &parts[..parts.len() - 1];
+                let symbol = parts[parts.len() - 1];
+                result.push(BarrelReExport {
+                    symbols: vec![symbol.to_string()],
+                    from_specifier: format!("./{}", module_parts.join("/")),
+                    wildcard: false,
+                    namespace_wildcard: false,
+                });
             }
         }
     }
@@ -1121,6 +1148,50 @@ impl RustExtractor {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// join_multiline_pub_use
+// ---------------------------------------------------------------------------
+
+/// Join multi-line `pub use module::{\n  ...\n};` into single lines.
+/// Uses brace depth tracking to handle nested use trees like `pub use a::{B::{C, D}, E};`.
+pub(crate) fn join_multiline_pub_use(text: &str) -> String {
+    let mut result = String::new();
+    let mut accumulator: Option<String> = None;
+    let mut brace_depth: usize = 0;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(ref mut acc) = accumulator {
+            acc.push(' ');
+            acc.push_str(trimmed);
+            for ch in trimmed.chars() {
+                match ch {
+                    '{' => brace_depth += 1,
+                    '}' => brace_depth = brace_depth.saturating_sub(1),
+                    _ => {}
+                }
+            }
+            if brace_depth == 0 {
+                result.push_str(acc);
+                result.push('\n');
+                accumulator = None;
+            }
+        } else if trimmed.starts_with("pub use ") && trimmed.contains('{') && !trimmed.contains('}')
+        {
+            brace_depth = trimmed.chars().filter(|&c| c == '{').count()
+                - trimmed.chars().filter(|&c| c == '}').count();
+            accumulator = Some(trimmed.to_string());
+        } else {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+    if let Some(acc) = accumulator {
+        result.push_str(&acc);
+        result.push('\n');
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -3628,6 +3699,304 @@ cfg_feat! {
              mod_mapping: {:?}, copy_mapping: {:?}",
             mod_mapping.map(|m| &m.test_files),
             copy_mapping.map(|m| &m.test_files)
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-CFG-01: file_exports_any_symbol finds pub struct inside cfg macro
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_cfg_01_finds_pub_struct_inside_cfg_macro() {
+        use std::io::Write;
+
+        // Given: temp file with source `cfg_net! { pub struct TcpListener { field: u32 } }`
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmp,
+            "cfg_net! {{ pub struct TcpListener {{ field: u32 }} }}\n"
+        )
+        .unwrap();
+        let path = tmp.path();
+
+        // When: file_exports_any_symbol(path, ["TcpListener"]) called
+        let extractor = RustExtractor::new();
+        let symbols = vec!["TcpListener".to_string()];
+        let result = extractor.file_exports_any_symbol(path, &symbols);
+
+        // Then: returns true
+        assert!(
+            result,
+            "Expected file_exports_any_symbol to return true for pub struct inside cfg macro, got false"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-CFG-02: file_exports_any_symbol returns false for non-exported symbol
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_cfg_02_returns_false_for_missing_symbol() {
+        use std::io::Write;
+
+        // Given: temp file with source `cfg_net! { pub struct TcpListener { field: u32 } }`
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmp,
+            "cfg_net! {{ pub struct TcpListener {{ field: u32 }} }}\n"
+        )
+        .unwrap();
+        let path = tmp.path();
+
+        // When: file_exports_any_symbol(path, ["NotHere"]) called
+        let extractor = RustExtractor::new();
+        let symbols = vec!["NotHere".to_string()];
+        let result = extractor.file_exports_any_symbol(path, &symbols);
+
+        // Then: returns false
+        assert!(
+            !result,
+            "Expected file_exports_any_symbol to return false for symbol not in file, got true"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-EXPORT-CFG-03: file_exports_any_symbol does not match pub(crate)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_export_cfg_03_does_not_match_pub_crate() {
+        use std::io::Write;
+
+        // Given: temp file with source `cfg_net! { pub(crate) struct Internal { field: u32 } }`
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmp,
+            "cfg_net! {{ pub(crate) struct Internal {{ field: u32 }} }}\n"
+        )
+        .unwrap();
+        let path = tmp.path();
+
+        // When: file_exports_any_symbol(path, ["Internal"]) called
+        let extractor = RustExtractor::new();
+        let symbols = vec!["Internal".to_string()];
+        let result = extractor.file_exports_any_symbol(path, &symbols);
+
+        // Then: returns false (pub(crate) is not a public export)
+        assert!(
+            !result,
+            "Expected file_exports_any_symbol to return false for pub(crate) struct, got true"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-MULTILINE-USE-01: join_multiline_pub_use joins multi-line pub use
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_multiline_use_01_joins_multiline_pub_use() {
+        // Given: multi-line pub use block
+        let text = "    pub use util::{\n        AsyncReadExt,\n        AsyncWriteExt,\n    };\n";
+
+        // When: join_multiline_pub_use called
+        let result = join_multiline_pub_use(text);
+
+        // Then: result contains "pub use util::{" and "AsyncReadExt" and "}" on one line
+        assert!(
+            result.contains("pub use util::{"),
+            "Expected result to contain 'pub use util::{{', got: {:?}",
+            result
+        );
+        assert!(
+            result.contains("AsyncReadExt"),
+            "Expected result to contain 'AsyncReadExt', got: {:?}",
+            result
+        );
+        assert!(
+            result.contains('}'),
+            "Expected result to contain '}}', got: {:?}",
+            result
+        );
+        // The joined form should appear on a single line (no newline within the pub use statement)
+        let joined_line = result.lines().find(|l| l.contains("pub use util::"));
+        assert!(
+            joined_line.is_some(),
+            "Expected a single line containing 'pub use util::', got: {:?}",
+            result
+        );
+        let joined_line = joined_line.unwrap();
+        assert!(
+            joined_line.contains("AsyncReadExt") && joined_line.contains('}'),
+            "Expected joined line to contain both 'AsyncReadExt' and '}}', got: {:?}",
+            joined_line
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-MULTILINE-USE-02: extract_re_exports_from_text parses joined multi-line pub use
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_multiline_use_02_extract_re_exports_parses_multiline_cfg_pub_use() {
+        // Given: barrel source with multi-line pub use inside cfg macro
+        let source =
+            "cfg_io! {\n    pub use util::{\n        Copy,\n        AsyncReadExt,\n    };\n}\n";
+
+        // When: extract_barrel_re_exports called on mod.rs
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: result has entry with from_specifier="./util", symbols contains "Copy" and "AsyncReadExt"
+        let entry = result.iter().find(|e| e.from_specifier == "./util");
+        assert!(
+            entry.is_some(),
+            "Expected entry with from_specifier='./util', got: {:?}",
+            result
+        );
+        let entry = entry.unwrap();
+        assert!(
+            entry.symbols.contains(&"Copy".to_string()),
+            "Expected 'Copy' in symbols, got: {:?}",
+            entry.symbols
+        );
+        assert!(
+            entry.symbols.contains(&"AsyncReadExt".to_string()),
+            "Expected 'AsyncReadExt' in symbols, got: {:?}",
+            entry.symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L2-CFG-EXPORT-E2E: L2 resolves through cfg-wrapped production file
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l2_cfg_export_e2e_resolves_through_cfg_wrapped_production_file() {
+        // Given: Cargo project with:
+        //   src/net/mod.rs: `cfg_net! { pub mod tcp; pub use tcp::listener::TcpListener; }`
+        //   src/net/tcp/mod.rs: `pub mod listener;`
+        //   src/net/tcp/listener.rs: `cfg_net! { pub struct TcpListener; }`
+        //   tests/test_net.rs: `use my_crate::net::TcpListener;`
+        let tmp = tempfile::tempdir().unwrap();
+        let src_net_dir = tmp.path().join("src").join("net");
+        let src_tcp_dir = src_net_dir.join("tcp");
+        let src_listener_dir = src_tcp_dir.join("listener");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_net_dir).unwrap();
+        std::fs::create_dir_all(&src_tcp_dir).unwrap();
+        std::fs::create_dir_all(&src_listener_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let net_mod_rs = src_net_dir.join("mod.rs");
+        std::fs::write(
+            &net_mod_rs,
+            "cfg_net! { pub mod tcp; pub use tcp::listener::TcpListener; }\n",
+        )
+        .unwrap();
+
+        let tcp_mod_rs = src_tcp_dir.join("mod.rs");
+        std::fs::write(&tcp_mod_rs, "pub mod listener;\n").unwrap();
+
+        let listener_rs = src_tcp_dir.join("listener.rs");
+        std::fs::write(&listener_rs, "cfg_net! { pub struct TcpListener; }\n").unwrap();
+
+        let test_net_rs = tests_dir.join("test_net.rs");
+        let test_source = "use my_crate::net::TcpListener;\n\n#[test]\nfn test_net() {}\n";
+        std::fs::write(&test_net_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let listener_path = listener_rs.to_string_lossy().into_owned();
+        let test_path = test_net_rs.to_string_lossy().into_owned();
+        let production_files = vec![
+            net_mod_rs.to_string_lossy().into_owned(),
+            tcp_mod_rs.to_string_lossy().into_owned(),
+            listener_path.clone(),
+        ];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports called
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: src/net/tcp/listener.rs is mapped to test_net.rs
+        let mapping = result.iter().find(|m| m.production_file == listener_path);
+        assert!(
+            mapping.is_some(),
+            "No mapping found for src/net/tcp/listener.rs"
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_net.rs to map to listener.rs through cfg-wrapped barrel (L2), got: {:?}",
+            mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L2-CFG-MULTILINE-E2E: L2 resolves through multi-line cfg pub use
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l2_cfg_multiline_e2e_resolves_through_multiline_cfg_pub_use() {
+        // Given: Cargo project with:
+        //   src/io/mod.rs: `cfg_io! {\n    pub use util::{\n        AsyncReadExt,\n        Copy,\n    };\n}`
+        //   src/io/util.rs: `pub trait AsyncReadExt {} pub fn Copy() {}`
+        //   tests/test_io.rs: `use my_crate::io::AsyncReadExt;`
+        let tmp = tempfile::tempdir().unwrap();
+        let src_io_dir = tmp.path().join("src").join("io");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_io_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let io_mod_rs = src_io_dir.join("mod.rs");
+        std::fs::write(
+            &io_mod_rs,
+            "cfg_io! {\n    pub use util::{\n        AsyncReadExt,\n        Copy,\n    };\n}\n",
+        )
+        .unwrap();
+
+        let util_rs = src_io_dir.join("util.rs");
+        std::fs::write(&util_rs, "pub trait AsyncReadExt {}\npub fn Copy() {}\n").unwrap();
+
+        let test_io_rs = tests_dir.join("test_io.rs");
+        let test_source = "use my_crate::io::AsyncReadExt;\n\n#[test]\nfn test_io() {}\n";
+        std::fs::write(&test_io_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let util_path = util_rs.to_string_lossy().into_owned();
+        let test_path = test_io_rs.to_string_lossy().into_owned();
+        let production_files = vec![io_mod_rs.to_string_lossy().into_owned(), util_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports called
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: src/io/util.rs mapped to test_io.rs
+        let mapping = result.iter().find(|m| m.production_file == util_path);
+        assert!(mapping.is_some(), "No mapping found for src/io/util.rs");
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_io.rs to map to util.rs through multi-line cfg pub use (L2), got: {:?}",
+            mapping.test_files
         );
     }
 }
