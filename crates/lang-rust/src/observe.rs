@@ -747,6 +747,12 @@ fn parse_use_path(path: &str, result: &mut HashMap<String, Vec<String>>) {
         return;
     }
 
+    // Single-segment module import (e.g., `use crate::fs`)
+    if !path.contains("::") && !path.is_empty() {
+        result.entry(path.to_string()).or_default();
+        return;
+    }
+
     // Simple path: `module::Symbol`
     let parts: Vec<&str> = path.split("::").collect();
     if parts.len() >= 2 {
@@ -765,6 +771,17 @@ fn parse_use_path(path: &str, result: &mut HashMap<String, Vec<String>>) {
 fn extract_re_exports_from_text(text: &str, result: &mut Vec<BarrelReExport>) {
     for line in text.lines() {
         let trimmed = line.trim();
+        // Skip token_tree boundary lines (bare `{` or `}`)
+        if trimmed == "{" || trimmed == "}" {
+            continue;
+        }
+        // Strip surrounding braces for single-line token_tree: "{ pub use ...; }"
+        let trimmed = trimmed
+            .strip_prefix('{')
+            .unwrap_or(trimmed)
+            .strip_suffix('}')
+            .unwrap_or(trimmed)
+            .trim();
 
         // pub mod foo; or pub(crate) mod foo;
         if (trimmed.starts_with("pub mod ") || trimmed.starts_with("pub(crate) mod "))
@@ -791,6 +808,17 @@ fn extract_re_exports_from_text(text: &str, result: &mut Vec<BarrelReExport>) {
                 .trim_start_matches("pub use ")
                 .trim_end_matches(';')
                 .trim();
+            let use_path = use_path.strip_prefix("self::").unwrap_or(use_path);
+            // pub use self::*; -> after strip, use_path = "*"
+            if use_path == "*" {
+                result.push(BarrelReExport {
+                    symbols: Vec::new(),
+                    from_specifier: "./".to_string(),
+                    wildcard: true,
+                    namespace_wildcard: false,
+                });
+                continue;
+            }
             // Delegate to the same text-based parsing used for tree-sitter nodes
             if use_path.ends_with("::*") {
                 let module_part = use_path.strip_suffix("::*").unwrap_or("");
@@ -841,6 +869,19 @@ fn extract_pub_use_re_exports(
     result: &mut Vec<BarrelReExport>,
 ) {
     let full_text = arg.utf8_text(source_bytes).unwrap_or("");
+    // Strip `self::` prefix (means "current module" in Rust)
+    let full_text = full_text.strip_prefix("self::").unwrap_or(full_text);
+
+    // pub use self::*; -> after strip, full_text = "*"
+    if full_text == "*" {
+        result.push(BarrelReExport {
+            symbols: Vec::new(),
+            from_specifier: "./".to_string(),
+            wildcard: true,
+            namespace_wildcard: false,
+        });
+        return;
+    }
 
     // pub use module::*;
     if full_text.ends_with("::*") {
@@ -3299,5 +3340,294 @@ cfg_feat! {
             result
         );
         assert!(entry.unwrap().wildcard);
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-09: parse_use_path single-segment module import (use crate::fs)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_09_single_segment_module_import() {
+        // Given: source with a single-segment module import after crate:: prefix
+        let source = "use crate::fs;\n";
+
+        // When: extract_all_import_specifiers is called
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_all_import_specifiers(source);
+
+        // Then: result contains ("fs", []) — single-segment module import with empty symbols
+        let entry = result.iter().find(|(spec, _)| spec == "fs");
+        assert!(
+            entry.is_some(),
+            "fs not found in {:?} (single-segment module import should be registered)",
+            result
+        );
+        let (_, symbols) = entry.unwrap();
+        assert!(
+            symbols.is_empty(),
+            "Expected empty symbols for module import, got: {:?}",
+            symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-IMP-10: parse_use_path single-segment with crate_name
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_imp_10_single_segment_with_crate_name() {
+        // Given: source `use my_crate::util;\n`, crate_name = "my_crate"
+        let source = "use my_crate::util;\n";
+
+        // When: extract_import_specifiers_with_crate_name called with crate_name = "my_crate"
+        let result = extract_import_specifiers_with_crate_name(source, Some("my_crate"));
+
+        // Then: result contains ("util", []) — single-segment module import with empty symbols
+        let entry = result.iter().find(|(spec, _)| spec == "util");
+        assert!(
+            entry.is_some(),
+            "util not found in {:?} (single-segment with crate_name should be registered)",
+            result
+        );
+        let (_, symbols) = entry.unwrap();
+        assert!(
+            symbols.is_empty(),
+            "Expected empty symbols for module import, got: {:?}",
+            symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-BARREL-SELF-01: extract_barrel_re_exports strips self:: from wildcard
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_barrel_self_01_strips_self_from_wildcard() {
+        // Given: barrel source with `pub use self::sub::*;`
+        let source = "pub use self::sub::*;\n";
+
+        // When: extract_barrel_re_exports is called on mod.rs
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: from_specifier = "./sub" (not "./self/sub"), wildcard = true
+        let entry = result.iter().find(|e| e.from_specifier == "./sub");
+        assert!(
+            entry.is_some(),
+            "./sub not found in {:?} (self:: prefix should be stripped from wildcard)",
+            result
+        );
+        assert!(
+            entry.unwrap().wildcard,
+            "Expected wildcard=true for pub use self::sub::*"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-BARREL-SELF-02: extract_barrel_re_exports strips self:: from symbol
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_barrel_self_02_strips_self_from_symbol() {
+        // Given: barrel source with `pub use self::file::File;`
+        let source = "pub use self::file::File;\n";
+
+        // When: extract_barrel_re_exports is called on mod.rs
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: from_specifier = "./file" (not "./self/file"), symbols = ["File"]
+        let entry = result.iter().find(|e| e.from_specifier == "./file");
+        assert!(
+            entry.is_some(),
+            "./file not found in {:?} (self:: prefix should be stripped from symbol import)",
+            result
+        );
+        let entry = entry.unwrap();
+        assert!(
+            entry.symbols.contains(&"File".to_string()),
+            "Expected symbols=[\"File\"], got: {:?}",
+            entry.symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-BARREL-SELF-03: extract_barrel_re_exports strips self:: from use list
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_barrel_self_03_strips_self_from_use_list() {
+        // Given: barrel source with `pub use self::sync::{Mutex, RwLock};`
+        let source = "pub use self::sync::{Mutex, RwLock};\n";
+
+        // When: extract_barrel_re_exports is called on mod.rs
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: from_specifier = "./sync" (not "./self/sync"), symbols contains "Mutex" and "RwLock"
+        let entry = result.iter().find(|e| e.from_specifier == "./sync");
+        assert!(
+            entry.is_some(),
+            "./sync not found in {:?} (self:: prefix should be stripped from use list)",
+            result
+        );
+        let entry = entry.unwrap();
+        assert!(
+            entry.symbols.contains(&"Mutex".to_string()),
+            "Expected Mutex in symbols, got: {:?}",
+            entry.symbols
+        );
+        assert!(
+            entry.symbols.contains(&"RwLock".to_string()),
+            "Expected RwLock in symbols, got: {:?}",
+            entry.symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-BARREL-CFG-SELF-01: extract_re_exports_from_text strips self:: in cfg macro
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_barrel_cfg_self_01_strips_self_in_cfg_macro() {
+        // Given: barrel source with cfg macro block containing `pub use self::inner::Symbol;`
+        let source = "cfg_feat! { pub use self::inner::Symbol; }\n";
+
+        // When: extract_barrel_re_exports is called on mod.rs
+        let extractor = RustExtractor::new();
+        let result = extractor.extract_barrel_re_exports(source, "src/mod.rs");
+
+        // Then: from_specifier = "./inner" (not "./self/inner"), symbols = ["Symbol"]
+        let entry = result.iter().find(|e| e.from_specifier == "./inner");
+        assert!(
+            entry.is_some(),
+            "./inner not found in {:?} (self:: prefix should be stripped in cfg macro text path)",
+            result
+        );
+        let entry = entry.unwrap();
+        assert!(
+            entry.symbols.contains(&"Symbol".to_string()),
+            "Expected symbols=[\"Symbol\"], got: {:?}",
+            entry.symbols
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L2-SELF-BARREL-E2E: L2 resolves through self:: barrel
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l2_self_barrel_e2e_resolves_through_self_barrel() {
+        // Given: Cargo project with:
+        //   src/fs/mod.rs (barrel: `pub use self::file::File;`)
+        //   src/fs/file.rs (exports `pub struct File;`)
+        //   tests/test_fs.rs (imports `use my_crate::fs::File;`)
+        let tmp = tempfile::tempdir().unwrap();
+        let src_fs_dir = tmp.path().join("src").join("fs");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_fs_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let mod_rs = src_fs_dir.join("mod.rs");
+        std::fs::write(&mod_rs, "pub use self::file::File;\n").unwrap();
+
+        let file_rs = src_fs_dir.join("file.rs");
+        std::fs::write(&file_rs, "pub struct File;\n").unwrap();
+
+        let test_fs_rs = tests_dir.join("test_fs.rs");
+        let test_source = "use my_crate::fs::File;\n\n#[test]\nfn test_fs() {}\n";
+        std::fs::write(&test_fs_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let file_path = file_rs.to_string_lossy().into_owned();
+        let test_path = test_fs_rs.to_string_lossy().into_owned();
+        let production_files = vec![file_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: src/fs/file.rs is mapped to test_fs.rs (L2 resolves through self:: barrel)
+        let mapping = result.iter().find(|m| m.production_file == file_path);
+        assert!(mapping.is_some(), "No mapping for src/fs/file.rs");
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "Expected test_fs.rs to map to file.rs through self:: barrel (L2), got: {:?}",
+            mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L2-SINGLE-SEG-E2E: L2 resolves single-segment module import
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l2_single_seg_e2e_resolves_single_segment_module() {
+        // Given: Cargo project with:
+        //   src/fs/mod.rs (barrel: `pub mod copy;`)
+        //   src/fs/copy.rs (`pub fn copy_file() {}`)
+        //   tests/test_fs.rs (imports `use my_crate::fs;`)
+        let tmp = tempfile::tempdir().unwrap();
+        let src_fs_dir = tmp.path().join("src").join("fs");
+        let tests_dir = tmp.path().join("tests");
+        std::fs::create_dir_all(&src_fs_dir).unwrap();
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[package]\nname = \"my-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+
+        let mod_rs = src_fs_dir.join("mod.rs");
+        std::fs::write(&mod_rs, "pub mod copy;\n").unwrap();
+
+        let copy_rs = src_fs_dir.join("copy.rs");
+        std::fs::write(&copy_rs, "pub fn copy_file() {}\n").unwrap();
+
+        let test_fs_rs = tests_dir.join("test_fs.rs");
+        let test_source = "use my_crate::fs;\n\n#[test]\nfn test_fs() {}\n";
+        std::fs::write(&test_fs_rs, test_source).unwrap();
+
+        let extractor = RustExtractor::new();
+        let mod_path = mod_rs.to_string_lossy().into_owned();
+        let copy_path = copy_rs.to_string_lossy().into_owned();
+        let test_path = test_fs_rs.to_string_lossy().into_owned();
+        let production_files = vec![mod_path.clone(), copy_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_source.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: map_test_files_with_imports is called
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: src/fs/mod.rs or sub-modules (copy.rs) is mapped to test_fs.rs
+        // (single-segment import `use my_crate::fs` should resolve to the fs module)
+        let mod_mapping = result.iter().find(|m| m.production_file == mod_path);
+        let copy_mapping = result.iter().find(|m| m.production_file == copy_path);
+        let mod_mapped = mod_mapping
+            .map(|m| m.test_files.contains(&test_path))
+            .unwrap_or(false);
+        let copy_mapped = copy_mapping
+            .map(|m| m.test_files.contains(&test_path))
+            .unwrap_or(false);
+        assert!(
+            mod_mapped || copy_mapped,
+            "Expected test_fs.rs to map to src/fs/mod.rs or src/fs/copy.rs via single-segment L2, \
+             mod_mapping: {:?}, copy_mapping: {:?}",
+            mod_mapping.map(|m| &m.test_files),
+            copy_mapping.map(|m| &m.test_files)
+        );
     }
 }
