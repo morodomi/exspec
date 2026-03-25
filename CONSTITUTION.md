@@ -75,8 +75,7 @@ exspec errs on the side of being quiet. A false positive at BLOCK level destroys
 - Python: dotted import resolution, `__init__.py` barrel
 - Rust: `use crate::`/`use cratename::` resolution, workspace member aggregation, `pub mod` barrel
 - PHP: PSR-4 namespace resolution
-- Ship criteria (default): Precision >= 98%, Recall >= 90% (test file coverage)
-- Ship criteria (PHP): Precision >= 98%, Recall >= 85% — structural ceiling at R=88.6% due to parent class inheritance, IoC resolution, and string literal patterns unreachable by static import tracing
+- Ship criteria: Precision >= 98%, Recall >= 90% (test file coverage)
 
 ### The 4 Properties
 
