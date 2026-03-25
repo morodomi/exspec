@@ -19,21 +19,23 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 |----------|-----------|--------|-----------|--------|---------------|
 | TypeScript | 100% | 91% | NestJS (77-pair) | **stable** | PASS |
 | Python | 98.2% | 96.8% | httpx (30 files) | **stable** | PASS |
-| Rust | 100% | 50.8% / 14.3% | tokio (52-file) / clap (91-file) | experimental | P PASS, R FAIL (both hard-case) |
+| Rust | 100% | 78.3% / 50.8% / 14.3% | tower (23-file) / tokio (52-file) / clap (91-file) | experimental | P PASS, R FAIL (all libraries) |
 | PHP | ~100% | 88.6% (post-#193/#194) | Laravel (912 files, 45-pair GT) | **stable** | PASS (per-language: P>=98%, R>=85%) |
 
 | Priority | Task | Type | Expected Impact |
 |----------|------|------|-----------------|
-| P2 | Rust normal-case library dogfooding | observe recall | clap/tokio は両方 hard-case。ship 判定用の normal-case library を探す |
-| P2 | Rust crate root barrel re-export resolution | observe recall | clap/tokio の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
+| P2 | Rust mod.rs barrel type resolution | observe recall | tower/filter/hedge/steer の dominant FN cause。`filter/mod.rs` に定義されたシンボルを observe が認識できれば R が改善 |
+| P2 | Rust crate root barrel re-export resolution | observe recall | tokio/clap の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
 
-**Why Rust R=50.8% (tokio) / 14.3% (clap) is low**: dominant FN cause は crate root barrel re-export (`use clap::Arg`, `use tokio::sync::broadcast`)。observe は multi-hop re-export chain を追跡できない。この制約は両 library で共通。
+**Why Rust R=78.3% (tower) is the best we see**: tower は crate root barrel re-export を避けている (サブモジュール直接 import)。しかし `mod.rs` に定義されたシンボル (filter::AsyncFilter, hedge::Hedge, steer::Steer) は observe がマッピングできない。これが tower の 5 FN の原因。
+
+**tower GT 結論 (2026-03-25)**: tower (commit 251296d) は 17-library 調査で最高 recall (78.3%)。import pattern は submodule direct import (normal-case)。しかし R=78.3% < 90%。FN cause: `mod.rs` に定義された型。ship criteria FAIL。
+
+**Decision (2026-03-25)**: 17-library 調査完了。どのライブラリも R>=90% を達成していない。Rust observe の ship は引き続き保留。次のステップは mod.rs barrel 型の resolution 実装 (tower FN 原因) か、crate root barrel resolution (tokio/clap FN 原因)。
 
 **clap GT 結論 (2026-03-25)**: clap (commit 70f3bb3) は normal-case library ではなかった。R=14.3% (13/91)。FN の主因は tokio と同じ crate root barrel。clap も「hard case」として分類。
 
-**Decision**: ship 判定には crate root barrel を使わない library (e.g., 自分自身のサブモジュールを直接 import する library) が必要。現時点では該当 library が見つかっていない。Rust observe の ship は保留。tokio R (50.8%) と clap R (14.3%) はいずれも参考値。
-
-**Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。
+**Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。tower が best-surveyed library として新しい baseline。
 
 **PHP re-dogfood 結果 (2026-03-25)**: #193/#194 実装後の実測。R=88.6% (808/912)。P=~100% (PASS)。fan-out filter blocked 0 files。残り 104 FN は structural ceiling (AbstractBladeTestCase 54 / string-literal-use 28 / IoC helper 10 / other 12)。R=88.6% は現アプローチの上限。
 
@@ -55,6 +57,21 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 | P3 | #113/#114/#115 Refactoring (cached_query, dedup, trait) | Internal cleanup |
 
 ## Completed Recently
+
+### Rust normal-case library survey: tower GT (17 libraries, 2026-03-25)
+
+Goal: 17 libraries を調査し、ship criteria 評価用の normal-case GT library を特定する。
+
+| Task | Status | Result |
+|------|--------|--------|
+| 17-library recall survey | DONE | tower が最高 R=78.3% (best-surveyed) |
+| tower 18-file full audit (tower/tests/) | DONE | 18 TP, 0 FP, 5 FN |
+| tower GT doc creation | DONE | `docs/observe-ground-truth-rust-tower.md` |
+| Ship criteria evaluation | DONE | P=100% PASS, R=78.3% FAIL. No library achieves R>=90% |
+
+**Key insight**: tower は crate root barrel re-export を回避しており、tokio/clap と異なる FN パターンを示す。しかし `mod.rs` に定義された型 (filter::AsyncFilter 等) は observe が認識できず、5 FN が発生。これは crate root barrel とは別の distinct FN cause。
+
+**Decision**: tower は「best-surveyed baseline」として記録。17-library 調査でどのライブラリも R>=90% を達成しないことが確定。Rust observe の ship requires either mod.rs barrel resolution OR crate root barrel resolution improvement.
 
 ### PHP ship criteria decision: stable at R=88.6% (2026-03-25)
 

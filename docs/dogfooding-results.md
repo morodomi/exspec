@@ -1,7 +1,53 @@
 # Dogfooding Results
 
-Latest: 2026-03-25, exspec v0.4.5-dev (post-#183, reverse fan-out filter + GT update)
+Latest: 2026-03-25, exspec v0.4.5-dev (tower GT + 17-library survey)
 Initial: 2026-03-09, exspec v0.1.0 (commit 5957cd0)
+
+## Rust observe normal-case library survey (2026-03-25)
+
+GT file: `docs/observe-ground-truth-rust-tower.md`
+
+### 17-library survey results
+
+Goal: Find a Rust library where observe achieves R>=90% (normal-case baseline for ship criteria).
+
+| Library | Test Files | Recall | Classification |
+|---------|-----------|--------|----------------|
+| tower | 23 (15 external + 8 inline) | **78.3%** (18/23) | best-surveyed |
+| rayon | 23 | 82.6% | moderate |
+| bytes | 12 | 75.0% | moderate |
+| regex | 44 | 72.7% | moderate |
+| axum | 122 | 63.9% | moderate |
+| tokio | 272 | 50.8% | hard-case |
+| serde_json | 31 | 38.7% | hard-case |
+| syn | 41 | 39.0% | hard-case |
+| crossbeam | 31 | 22.6% | hard-case |
+| anyhow | 24 | 16.7% | hard-case |
+| itertools | 13 | 15.4% | hard-case |
+| clap | 91 | 14.3% | hard-case |
+| serde | 150 | 0.0% | hard-case |
+
+(log, hyper, parking_lot, aho-corasick, dashmap: too few test files for meaningful measurement)
+
+Note: recall figures for non-tower libraries are approximate (survey-level, not full GT audits).
+
+### Tower full audit results
+
+| Metric | Value | Target | Result |
+|--------|-------|--------|--------|
+| Precision | **100%** | >= 98% | **PASS** |
+| Recall (GT: 23 files) | **78.3%** (18/23) | >= 90% | **FAIL** |
+| TP | 18 (10 external + 8 inline) | - | - |
+| FP | 0 | 0 | - |
+| FN | 5 | - | - |
+
+**FN root cause**: 5 external test files use `use tower::filter::AsyncFilter` / `use tower::hedge::Hedge` / `use tower::steer::Steer` style imports where the type is defined in a `mod.rs` file. observe does not recognize `mod.rs` files as mappable production files, causing these tests to be missed.
+
+**Key finding**: tower uses submodule direct imports (e.g., `use tower::retry::Policy`, `use tower::buffer::error::*`) rather than crate-root barrel re-export. This eliminates the dominant FN cause seen in tokio/clap. However, `mod.rs`-defined types remain a distinct FN pattern. tower is the best-performing library in the survey but does not reach R>=90%.
+
+**Ship criteria**: P=100% PASS, R=78.3% FAIL. No surveyed library achieves R>=90%. Rust observe ship criteria remain unmet.
+
+**Note on cycle doc R=94.7%**: The cycle doc (20260325_2228) recorded R=94.7% (18/19) based on misreading the observe summary field `test_files: 19, mapped_files: 19`. That field counts production files that have test mappings (production-centric), not the test-file recall. The correct GT-based recall is 78.3%.
 
 ## v0.4.5-dev Stratified GT Re-audit (53-file, 2026-03-25)
 

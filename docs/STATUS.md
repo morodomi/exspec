@@ -2,9 +2,9 @@
 
 ## Current Phase
 
-v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP **stable** P~100%, R=88.6% (per-language ship criteria R>=85% PASS).
+v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case) / R=78.3% (tower best-surveyed). PHP **stable** P~100%, R=88.6% (per-language ship criteria R>=85% PASS).
 
-observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: **P~100%, R=88.6%** (808/912, **stable**. per-language ship criteria P>=98% R>=85% PASS. structural ceiling: 104 FN = parent class/IoC/string literal patterns). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
+observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) / R=78.3% (tower 23-file GT, best surveyed) (experimental, P PASS R FAIL on all libraries. hard-case: crate root barrel FN; best-case: mod.rs-defined type FN). PHP: **P~100%, R=88.6%** (808/912, **stable**. per-language ship criteria P>=98% R>=85% PASS. structural ceiling: 104 FN = parent class/IoC/string literal patterns). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
 
 ## Progress
 
@@ -49,11 +49,26 @@ observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). R
 | GT update - secondary targets + io_driver scope exclusion | **DONE** |
 | #185 - L1.5 underscore-to-path stem matching | **DONE** |
 | clap GT - Rust observe multi-library dogfooding (clap) | **DONE** |
+| tower GT - Rust observe normal-case library survey (17 libraries, tower R=78.3%) | **DONE** |
 | #188 - Cross-crate import resolution for Rust integration tests | **DONE** |
 | #189 - L1 cross-directory subdir stem matching for Rust observe | **DONE** |
 | #193 - PHP observe Fixtures/Stubs helper detection + composer.json PSR-4 | **DONE** |
 | #194 - Directory-aware fan-out filter for recall improvement | **DONE** |
 | PHP re-dogfood (post-#193/#194) - R=88.6% (808/912), structural ceiling confirmed | **DONE** |
+
+### tower GT: Rust Observe P=100%, R=78.3% (2026-03-25)
+
+tower (commit 251296d) against exspec observe. GT scope: 23 files (15 external + 8 inline).
+
+| Metric | Value | Target |
+|--------|-------|--------|
+| Precision | **100%** | >= 98% |
+| Recall | **78.3%** (18/23) | >= 90% |
+| TP | 18 (10 external + 8 inline) | - |
+| FP | 0 | 0 |
+| FN | 5 | - |
+
+**Conclusion**: tower is the best-performing library in 17-library survey (avoids crate-root barrel re-export). However R=78.3% does not meet ship criterion R>=90%. Dominant FN cause: types defined in `mod.rs` files (filter/mod.rs, hedge/mod.rs, steer/mod.rs). No surveyed library achieves R>=90%. Rust observe ship criteria remain unmet. See `docs/observe-ground-truth-rust-tower.md`.
 
 ### clap GT: Rust Observe P=100%, R=14.3% (2026-03-25)
 
