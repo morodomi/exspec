@@ -18,6 +18,9 @@ static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 const IMPORT_MAPPING_QUERY: &str = include_str!("../queries/import_mapping.scm");
 static IMPORT_MAPPING_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
+const EXTENDS_CLASS_QUERY: &str = include_str!("../queries/extends_class.scm");
+static EXTENDS_CLASS_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
+
 fn php_language() -> tree_sitter::Language {
     tree_sitter_php::LANGUAGE_PHP.into()
 }
@@ -465,6 +468,63 @@ impl PhpExtractor {
         result_map.into_iter().collect()
     }
 
+    /// Extract import specifiers from the parent class of a test file.
+    /// Resolves the parent class to a file in the same directory, reads it,
+    /// and returns its raw `use` statements (unfiltered).
+    /// Only traces 1 level deep (direct parent only).
+    pub fn extract_parent_class_imports(
+        source: &str,
+        test_dir: &str,
+    ) -> Vec<(String, Vec<String>)> {
+        // Step 1: parse source and find extends clause
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+        let query = cached_query(&EXTENDS_CLASS_QUERY_CACHE, EXTENDS_CLASS_QUERY);
+
+        let parent_class_idx = query.capture_index_for_name("parent_class");
+
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(query, tree.root_node(), source_bytes);
+
+        let mut parent_class_name: Option<String> = None;
+        while let Some(m) = matches.next() {
+            for cap in m.captures {
+                if parent_class_idx == Some(cap.index) {
+                    let name = cap.node.utf8_text(source_bytes).unwrap_or("").to_string();
+                    if !name.is_empty() {
+                        parent_class_name = Some(name);
+                        break;
+                    }
+                }
+            }
+            if parent_class_name.is_some() {
+                break;
+            }
+        }
+
+        let parent_name = match parent_class_name {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+
+        // Step 2: look for parent file in same directory
+        let parent_file_name = format!("{parent_name}.php");
+        let parent_path = Path::new(test_dir).join(&parent_file_name);
+
+        // Read parent file
+        let parent_source = match std::fs::read_to_string(&parent_path) {
+            Ok(s) => s,
+            Err(_) => return Vec::new(),
+        };
+
+        // Step 3: extract raw import specifiers from parent
+        Self::extract_raw_import_specifiers(&parent_source)
+    }
+
     /// Layer 1 + Layer 2 (PSR-4): Map test files to production files.
     pub fn map_test_files_with_imports(
         &self,
@@ -513,7 +573,17 @@ impl PhpExtractor {
                 continue;
             }
             let raw_specifiers = Self::extract_raw_import_specifiers(source);
-            let specifiers: Vec<(String, Vec<String>)> = raw_specifiers
+            // Merge parent class imports (1-level, same directory only)
+            let parent_dir = Path::new(test_file.as_str())
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let parent_specifiers = Self::extract_parent_class_imports(source, &parent_dir);
+            let combined: Vec<(String, Vec<String>)> = raw_specifiers
+                .into_iter()
+                .chain(parent_specifiers.into_iter())
+                .collect();
+            let specifiers: Vec<(String, Vec<String>)> = combined
                 .into_iter()
                 .filter(|(module_path, _)| !is_external_namespace(module_path, Some(scan_root)))
                 .collect();
@@ -1387,5 +1457,251 @@ mod tests {
         let mappings =
             ext.map_test_files_with_imports(&production_files, &test_sources, dir.path(), false);
         assert!(mappings.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PHP-PARENT tests: parent class import propagation (TC-01 to TC-04)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod parent_class_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // -----------------------------------------------------------------------
+    // TC-01: Given test extends ParentClass in same dir, When parent has
+    //        `use Illuminate\Foo`, Then Foo is in test's import list
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc01_parent_imports_propagated_to_child() {
+        // Given: parent class with Illuminate imports in same directory as child
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let parent_source = r#"<?php
+namespace App\Tests;
+use Illuminate\View\Compilers\BladeCompiler;
+use Illuminate\Container\Container;
+use PHPUnit\Framework\TestCase;
+abstract class AbstractBaseTest extends TestCase {}"#;
+
+        let parent_file = test_dir.join("AbstractBaseTest.php");
+        std::fs::write(&parent_file, parent_source).unwrap();
+
+        let child_source = r#"<?php
+namespace App\Tests;
+class ChildTest extends AbstractBaseTest {
+    public function testSomething() { $this->assertTrue(true); }
+}"#;
+
+        // When: extract_parent_class_imports is called on the child
+        let parent_imports = PhpExtractor::extract_parent_class_imports(
+            child_source,
+            &parent_file.parent().unwrap().to_string_lossy(),
+        );
+
+        // Then: Illuminate imports from parent are returned
+        // (Illuminate is normally external, but parent_class_imports returns raw specifiers
+        //  from parent file — filtering for L2 is done at the call site)
+        assert!(
+            !parent_imports.is_empty(),
+            "expected parent Illuminate imports to be propagated, got: {parent_imports:?}"
+        );
+        let has_blade = parent_imports
+            .iter()
+            .any(|(m, _)| m.contains("BladeCompiler") || m.contains("Compilers"));
+        let has_container = parent_imports.iter().any(|(m, _)| m.contains("Container"));
+        assert!(
+            has_blade || has_container,
+            "expected BladeCompiler or Container in parent imports, got: {parent_imports:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-02: Given test extends ParentClass, When parent has no production
+    //        imports, Then no additional imports are added (guard test)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc02_parent_with_no_production_imports_adds_nothing() {
+        // Given: a parent class that only imports PHPUnit (external, no production imports)
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+        let app_dir = dir.path().join("app").join("Models");
+        std::fs::create_dir_all(&app_dir).unwrap();
+
+        let parent_source = r#"<?php
+namespace App\Tests;
+use PHPUnit\Framework\TestCase;
+abstract class MinimalBaseTest extends TestCase {}"#;
+
+        let parent_file = test_dir.join("MinimalBaseTest.php");
+        std::fs::write(&parent_file, parent_source).unwrap();
+
+        let child_source = r#"<?php
+namespace App\Tests;
+use App\Models\Order;
+class OrderTest extends MinimalBaseTest {
+    public function testOrder() { $this->assertTrue(true); }
+}"#;
+
+        let child_file = test_dir.join("OrderTest.php");
+        std::fs::write(&child_file, child_source).unwrap();
+
+        let prod_file = app_dir.join("Order.php");
+        std::fs::write(&prod_file, "<?php\nnamespace App\\Models;\nclass Order {}").unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            child_file.to_string_lossy().into_owned(),
+            child_source.to_string(),
+        );
+
+        // When: map_test_files_with_imports is called (parent has no production imports)
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path(), false);
+
+        // Then: OrderTest.php is still matched to Order.php via its own import (L2)
+        // and parent's lack of production imports does not break anything
+        let order_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("Order.php"))
+            .expect("expected Order.php in mappings");
+        assert!(
+            !order_mapping.test_files.is_empty(),
+            "expected OrderTest.php to be mapped to Order.php (child's own import), got empty"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-03: Given test extends external class (PHPUnit\TestCase),
+    //        When resolve parent, Then skip (external namespace guard)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc03_external_parent_class_skipped() {
+        // Given: a test that extends PHPUnit\Framework\TestCase directly
+        //        (no local parent file to trace)
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let app_dir = dir.path().join("app").join("Services");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let prod_file = app_dir.join("PaymentService.php");
+        std::fs::write(
+            &prod_file,
+            "<?php\nnamespace App\\Services;\nclass PaymentService {}",
+        )
+        .unwrap();
+
+        // This test directly extends TestCase (external), not a local abstract class
+        let test_source = r#"<?php
+use PHPUnit\Framework\TestCase;
+use App\Services\PaymentService;
+class PaymentServiceTest extends TestCase {
+    public function testPay() { $this->assertTrue(true); }
+}"#;
+        let test_file = test_dir.join("PaymentServiceTest.php");
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        // When: map_test_files_with_imports is called
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path(), false);
+
+        // Then: PaymentServiceTest.php is matched to PaymentService.php
+        //       (its own import works; external parent does not cause errors)
+        let payment_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("PaymentService.php"))
+            .expect("expected PaymentService.php in mappings");
+        assert!(
+            payment_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("PaymentServiceTest.php")),
+            "expected PaymentServiceTest.php mapped via own import; got: {:?}",
+            payment_mapping.test_files
+        );
+        // No panic, no infinite loop = external parent was skipped silently
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-04: Given circular inheritance (A extends B, B extends A),
+    //        When extract_parent_class_imports is called, Then no infinite loop
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc04_circular_inheritance_no_infinite_loop() {
+        // Given: two files that mutually extend each other (pathological case)
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let a_source = r#"<?php
+namespace App\Tests;
+use App\Models\Foo;
+class ATest extends BTest {}"#;
+
+        let b_source = r#"<?php
+namespace App\Tests;
+use App\Models\Bar;
+class BTest extends ATest {}"#;
+
+        let a_file = test_dir.join("ATest.php");
+        let b_file = test_dir.join("BTest.php");
+        std::fs::write(&a_file, a_source).unwrap();
+        std::fs::write(&b_file, b_source).unwrap();
+
+        // When: extract_parent_class_imports is called on A (which extends B, which extends A)
+        // Then: returns without infinite loop (function must complete in finite time)
+        let result =
+            PhpExtractor::extract_parent_class_imports(a_source, &test_dir.to_string_lossy());
+
+        // The result may be empty or contain Bar; crucially it must NOT hang.
+        // Just asserting this line is reached proves no infinite loop.
+        let _ = result;
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-05: Given Laravel observe after fix, When measure recall, Then R > 90%
+    // -----------------------------------------------------------------------
+    #[test]
+    #[ignore = "integration: requires local Laravel ground truth at /tmp/laravel"]
+    fn tc05_laravel_recall_above_90_percent() {
+        // Given: Laravel source tree at /tmp/laravel
+        // When: observe --lang php is run
+        // Then: Recall > 90% (parent class import propagation resolves AbstractBladeTestCase FN)
+        // NOTE: This is a placeholder. Actual measurement is done manually via:
+        //   cargo run -- observe --lang php --format json /tmp/laravel
+        // and compared against the ground truth in docs/dogfooding-results.md.
+        unimplemented!(
+            "Integration test: run `cargo run -- observe --lang php --format json /tmp/laravel`"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-06: Given Laravel observe after fix, When check precision, Then no new FP
+    // -----------------------------------------------------------------------
+    #[test]
+    #[ignore = "integration: requires local Laravel ground truth at /tmp/laravel"]
+    fn tc06_laravel_no_new_false_positives() {
+        // Given: Laravel source tree at /tmp/laravel
+        // When: observe --lang php is run after parent class propagation is implemented
+        // Then: Precision >= 96% (no new false positives introduced by parent import merging)
+        // NOTE: This is a placeholder. Actual measurement is done manually.
+        unimplemented!(
+            "Integration test: run `cargo run -- observe --lang php --format json /tmp/laravel`"
+        );
     }
 }
