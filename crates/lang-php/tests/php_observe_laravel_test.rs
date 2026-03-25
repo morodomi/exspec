@@ -13,7 +13,7 @@
 use std::path::Path;
 use std::process::Command;
 
-const LARAVEL_REPO: &str = "/tmp/exspec-dogfood/laravel";
+const LARAVEL_REPO: &str = "/tmp/laravel";
 
 /// Run `exspec observe --lang php --format json <root>` and return the parsed
 /// `serde_json::Value`.  The workspace manifest path is resolved relative to
@@ -67,21 +67,23 @@ fn count_mapped_test_files(report: &serde_json::Value) -> usize {
 
 /// Count total test files discovered (mapped + unmapped).
 fn count_total_test_files(report: &serde_json::Value) -> usize {
-    report["summary"]["total_test_files"].as_u64().unwrap_or(0) as usize
+    report["summary"]["test_files"].as_u64().unwrap_or(0) as usize
 }
 
 // ---------------------------------------------------------------------------
-// TC-04: Recall >= 85% after fixes
+// TC-04: Recall >= 88% after fixes (#193/#194)
 // ---------------------------------------------------------------------------
-/// Given Laravel observe JSON output after is_non_sut_helper fixes,
+/// Given Laravel observe JSON output after Fixtures/Stubs helper detection
+/// and directory-aware fan-out filter fixes (#193/#194),
 /// when recall is computed over all discovered test files,
-/// then recall >= 85%.
+/// then recall >= 88%.
 ///
 /// Baseline: 81.6% (before Fixtures/Stubs fix).
-/// Target: >= 85% (intermediate milestone toward ship criteria of >= 90%).
+/// Previous milestone: >= 85% (post-#192).
+/// Target: >= 88% (post-#193/#194, structural ceiling R=88.6%).
 #[test]
 #[ignore]
-fn tc04_recall_gte_85_percent() {
+fn tc04_recall_gte_88_percent() {
     // Given: Laravel repository exists
     assert!(
         Path::new(LARAVEL_REPO).exists(),
@@ -92,7 +94,7 @@ fn tc04_recall_gte_85_percent() {
     // When: observe runs
     let report = run_observe_json(LARAVEL_REPO);
 
-    // Then: recall >= 85%
+    // Then: recall >= 88%
     let total = count_total_test_files(&report);
     let mapped = count_mapped_test_files(&report);
 
@@ -103,8 +105,8 @@ fn tc04_recall_gte_85_percent() {
 
     let recall = mapped as f64 / total as f64;
     assert!(
-        recall >= 0.85,
-        "recall {:.1}% ({}/{}) is below target 85%",
+        recall >= 0.88,
+        "recall {:.1}% ({}/{}) is below target 88%",
         recall * 100.0,
         mapped,
         total

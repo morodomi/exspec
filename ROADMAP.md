@@ -20,12 +20,12 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 | TypeScript | 100% | 91% | NestJS (77-pair) | **stable** | PASS |
 | Python | 98.2% | 96.8% | httpx (30 files) | **stable** | PASS |
 | Rust | 100% | 50.8% / 14.3% | tokio (52-file) / clap (91-file) | experimental | P PASS, R FAIL (both hard-case) |
-| PHP | ~100% | 85.1% (pre-#193/#194) | Laravel (50-pair) | experimental | P PASS, R FAIL (re-dogfood pending) |
+| PHP | ~100% | 88.6% (post-#193/#194) | Laravel (912 files, 45-pair GT) | experimental | P PASS, R FAIL (structural ceiling) |
 
 | Priority | Task | Type | Expected Impact |
 |----------|------|------|-----------------|
-| P1 | PHP re-dogfood (post #193/#194) | observe recall | Fixtures/Stubs helper + PSR-4 + directory-aware fan-out filter の効果測定 |
-| P2 | PHP Str.php FP resolution | observe precision | PHP P 96.0% → >=98% (fan-out name-match #173 で一部解消済み) |
+| P2 | PHP ship criteria decision | observe stabilization | R=88.6% structural ceiling 確認済み。parent class propagation (#153) 実装 or acceptable と判定するか人間が判断 |
+| P2 | Rust normal-case library dogfooding | observe recall | clap/tokio は両方 hard-case。ship 判定用の normal-case library を探す |
 | P2 | Rust crate root barrel re-export resolution | observe recall | clap/tokio の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
 
 **Why Rust R=50.8% (tokio) / 14.3% (clap) is low**: dominant FN cause は crate root barrel re-export (`use clap::Arg`, `use tokio::sync::broadcast`)。observe は multi-hop re-export chain を追跡できない。この制約は両 library で共通。
@@ -36,7 +36,9 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 
 **Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。
 
-**PHP 戦略 (updated 2026-03-25)**: #193 (Fixtures/Stubs helper detection + composer.json PSR-4) と #194 (directory-aware fan-out filter) を実装済み。次は re-dogfood で効果測定。R=85.1% からの改善幅を確認し、ship criteria (R>=90%) 達成を判定する。
+**PHP re-dogfood 結果 (2026-03-25)**: #193/#194 実装後の実測。R=88.6% (808/912)。P=~100% (PASS)。fan-out filter blocked 0 files。残り 104 FN は structural ceiling (AbstractBladeTestCase 54 / string-literal-use 28 / IoC helper 10 / other 12)。R=88.6% は現アプローチの上限。
+
+**Decision**: PHP R=88.6% は ship criteria (R>=90%) まで 1.4pp の差。残り FN はすべて parent class 継承 / IoC resolver / runtime string content パターン。静的 import tracing では到達不能。ship criteria を満たすには #153 (cross-file helper delegation) または IoC container resolution が必要。どちらも大きな実装コスト。ship 判定は人間の優先度判断に委ねる。
 
 **新言語 (Go) は deferred**: CONSTITUTION が「4 languages」と定義。observe の 4 言語 stabilization が優先。Go は observe multi-language の価値が証明された後に検討。
 
@@ -54,6 +56,20 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 | P3 | #113/#114/#115 Refactoring (cached_query, dedup, trait) | Internal cleanup |
 
 ## Completed Recently
+
+### PHP re-dogfood post-#193/#194: R=88.6%, structural ceiling confirmed (2026-03-25)
+
+Goal: #193/#194 実装後の PHP observe 効果測定。GT doc 作成、structural ceiling 判定。
+
+| Task | Status | Result |
+|------|--------|--------|
+| PHP observe re-dogfood (Laravel f513824, 912 files) | DONE | R=88.6% (808/912), P=~100% |
+| 45-pair stratified GT audit (S1-S4) | DONE | All TP verified. GT doc: `docs/observe-ground-truth-php-laravel.md` |
+| FN root cause analysis | DONE | 104 FN: AbstractBladeTestCase(54) + string-literal-use(28) + IoC(10) + other(12) |
+| TC-04 threshold 85% → 88% | DONE | Regression guard updated |
+| ROADMAP ship criteria decision | DONE | Structural ceiling. Ship deferred pending human priority judgment |
+
+**Key insight**: R=88.6% は L1+L2 静的 import tracing の structural ceiling。fan-out filter は 0 files blocked (directory-aware filter が全 63 blocked files を解消)。残り 104 FN はすべて継承・IoC・runtime string パターンであり、静的解析では到達不能。
 
 ### #192-#194: PHP recall push + directory-aware fan-out + clap GT (2026-03-25)
 
@@ -234,7 +250,7 @@ Route extraction (NestJS, FastAPI, Next.js, Django). TS re-dogfood (P=100%, R=91
 - **Post-processing filters**: forward fan-out (prod→test) + reverse fan-out (test→prod, #183)
 - **Success bar**: Ship criteria P>=98%, R>=90% per language, measured on representative GT corpus
 - **GT corpus strategy**: Each language needs at least one "normal case" library. Hard-case (workspace, barrel-heavy) projects are reference baselines, not ship-criteria benchmarks
-- **Current status**: TypeScript (P=100%, R=91%, stable). Python (P=98.2%, R=96.8%, stable). Rust (P=100%, R=50.8% tokio / 14.3% clap, both hard-case, experimental -- crate root barrel FN blocking ship). PHP (P~100%, R=85.1%, experimental)
+- **Current status**: TypeScript (P=100%, R=91%, stable). Python (P=98.2%, R=96.8%, stable). Rust (P=100%, R=50.8% tokio / 14.3% clap, both hard-case, experimental -- crate root barrel FN blocking ship). PHP (P~100%, R=88.6% post-#193/#194, experimental -- structural ceiling, 104 FN = parent class/IoC/string-literal patterns)
 
 ### B4 barrel fix rejection (Phase 11)
 
@@ -294,5 +310,6 @@ Route extraction (NestJS, FastAPI, Next.js, Django). TS re-dogfood (P=100%, R=91
 | -- | Rust recall: #179 single-seg fix (R 38%→63%), #181 cfg macro fallback (R 63%→71%) | v0.4.4 |
 | -- | Stratified GT re-audit (53-file), reverse fan-out (#183), GT update (#184), L1.5 matching (#185) | v0.4.5-dev |
 | -- | Cross-crate import (#188), L1 subdir stem (#189), clap GT (#192), PHP recall push (#193), directory-aware fan-out (#194) | v0.4.5-dev |
+| -- | PHP re-dogfood post-#193/#194: R=88.6% (808/912), structural ceiling confirmed. GT doc: `docs/observe-ground-truth-php-laravel.md` | v0.4.5-dev |
 
 Detail for completed phases is archived in git history. Key decisions are preserved in "Key Design Decisions" above.

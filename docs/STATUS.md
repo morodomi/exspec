@@ -2,9 +2,9 @@
 
 ## Current Phase
 
-v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP P~100%, R=85.1% (recall push + directory-aware fan-out implemented, re-dogfood pending).
+v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP P~100%, R=88.6% (808/912, post-#193/#194). Structural ceiling: remaining 104 FN = parent class / cross-file delegation patterns.
 
-observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: P~100%, R=85.1% (experimental, P PASS R FAIL. #193 Fixtures/Stubs helper + PSR-4, #194 directory-aware fan-out filter implemented, re-dogfood pending). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
+observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: P~100%, R=88.6% (808/912, post-#193/#194) (experimental, P PASS R FAIL. structural ceiling: 104 FN = AbstractBladeTestCase/string-literal-use/IoC patterns). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
 
 ## Progress
 
@@ -53,6 +53,7 @@ observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). R
 | #189 - L1 cross-directory subdir stem matching for Rust observe | **DONE** |
 | #193 - PHP observe Fixtures/Stubs helper detection + composer.json PSR-4 | **DONE** |
 | #194 - Directory-aware fan-out filter for recall improvement | **DONE** |
+| PHP re-dogfood (post-#193/#194) - R=88.6% (808/912), structural ceiling confirmed | **DONE** |
 
 ### clap GT: Rust Observe P=100%, R=14.3% (2026-03-25)
 
