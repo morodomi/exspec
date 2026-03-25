@@ -722,6 +722,16 @@ fn find_members_recursive(
     }
 }
 
+/// Find a workspace member by its crate name (exact match).
+///
+/// Returns `None` if no member has the given crate name.
+pub fn find_member_by_crate_name<'a>(
+    name: &str,
+    members: &'a [WorkspaceMember],
+) -> Option<&'a WorkspaceMember> {
+    members.iter().find(|m| m.crate_name == name)
+}
+
 /// Find the workspace member that owns `path` by longest prefix match.
 ///
 /// Returns `None` if no member's `member_root` is a prefix of `path`.
@@ -803,9 +813,7 @@ fn parse_use_path(path: &str, result: &mut HashMap<String, Vec<String>>) {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty() && s != "*")
                 .collect();
-            if !specifier.is_empty() {
-                result.entry(specifier).or_default().extend(symbols);
-            }
+            result.entry(specifier).or_default().extend(symbols);
         }
         return;
     }
@@ -1214,6 +1222,35 @@ impl RustExtractor {
             );
         }
 
+        // Layer 2.5: Cross-crate barrel resolution
+        // For root tests with `use root_crate::Symbol`, resolve through root lib.rs
+        // `pub use external_crate::*` to workspace member production files.
+        if let Some(ref root_name) = crate_name {
+            let root_lib = scan_root.join("src/lib.rs");
+            if root_lib.exists() && !members.is_empty() {
+                let root_test_sources: HashMap<String, String> = test_sources
+                    .iter()
+                    .filter(|(path, _)| {
+                        find_member_for_path(Path::new(path.as_str()), &members).is_none()
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !root_test_sources.is_empty() {
+                    self.apply_l2_cross_crate_barrel(
+                        &root_test_sources,
+                        root_name,
+                        &root_lib,
+                        &members,
+                        &canonical_root,
+                        &canonical_to_idx,
+                        &mut mappings,
+                        l1_exclusive,
+                        &layer1_matched,
+                    );
+                }
+            }
+        }
+
         // Update strategy: if a production file had no Layer 1 matches but has Layer 2 matches,
         // set strategy to ImportTracing
         for (i, mapping) in mappings.iter_mut().enumerate() {
@@ -1271,6 +1308,175 @@ impl RustExtractor {
                     for idx in per_specifier_indices {
                         let prod_path = Path::new(&mappings[idx].production_file);
                         if self.file_exports_any_symbol(prod_path, symbols) {
+                            matched_indices.insert(idx);
+                        }
+                    }
+                }
+            }
+
+            for idx in matched_indices {
+                if !mappings[idx].test_files.contains(test_file) {
+                    mappings[idx].test_files.push(test_file.clone());
+                }
+            }
+        }
+    }
+
+    /// Layer 2.5: Cross-crate barrel resolution.
+    ///
+    /// Resolves `use root_crate::Symbol` by looking up `pub use member_crate::*`
+    /// (or named) re-exports in root `src/lib.rs`, then tracing through the
+    /// matched workspace member's `src/lib.rs` barrel to the actual production files.
+    ///
+    /// This handles the common pattern where a workspace root re-exports all items
+    /// from workspace member crates (e.g., `clap` re-exports `clap_builder::*`).
+    #[allow(clippy::too_many_arguments)]
+    fn apply_l2_cross_crate_barrel(
+        &self,
+        test_sources: &HashMap<String, String>,
+        root_crate_name: &str,
+        root_lib_path: &Path,
+        members: &[WorkspaceMember],
+        canonical_root: &Path,
+        canonical_to_idx: &HashMap<String, usize>,
+        mappings: &mut [FileMapping],
+        l1_exclusive: bool,
+        layer1_matched: &HashSet<String>,
+    ) {
+        // Read root lib.rs source
+        let root_lib_source = match std::fs::read_to_string(root_lib_path) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let root_lib_str = root_lib_path.to_string_lossy();
+
+        // Extract barrel re-exports from root lib.rs
+        let barrel_exports = self.extract_barrel_re_exports(&root_lib_source, &root_lib_str);
+        if barrel_exports.is_empty() {
+            return;
+        }
+
+        for (test_file, source) in test_sources {
+            if l1_exclusive && layer1_matched.contains(test_file) {
+                continue;
+            }
+
+            // Extract symbols imported at crate root level from test files.
+            // Two patterns:
+            //   1. `use clap::Arg`      → specifier="Arg", symbols=[]
+            //   2. `use clap::{Arg, Command}` → specifier="", symbols=["Arg","Command"]
+            let imports = extract_import_specifiers_with_crate_name(source, Some(root_crate_name));
+            let root_symbols: Vec<String> = {
+                let mut syms = Vec::new();
+                for (specifier, symbols) in &imports {
+                    if specifier.is_empty() && !symbols.is_empty() {
+                        // Brace-list at crate root: `use clap::{Arg, Command, ...}`
+                        syms.extend(symbols.clone());
+                    } else if !specifier.is_empty()
+                        && !specifier.contains('/')
+                        && symbols.is_empty()
+                    {
+                        // Single symbol: `use clap::Arg`
+                        syms.push(specifier.clone());
+                    }
+                }
+                syms
+            };
+
+            if root_symbols.is_empty() {
+                continue;
+            }
+
+            let mut matched_indices = HashSet::<usize>::new();
+
+            for barrel in &barrel_exports {
+                // Normalize from_specifier: "./clap_builder" → "clap_builder"
+                let crate_candidate = barrel
+                    .from_specifier
+                    .strip_prefix("./")
+                    .unwrap_or(&barrel.from_specifier);
+
+                // Skip local module re-exports (contains '/' after stripping './')
+                // e.g., "./builder/action" is a local path, not a crate name
+                if crate_candidate.contains('/') {
+                    continue;
+                }
+
+                // Lookup workspace member by crate name
+                let member = match find_member_by_crate_name(crate_candidate, members) {
+                    Some(m) => m,
+                    None => continue,
+                };
+
+                // Check if any of the imported symbols match this barrel re-export
+                let symbols_matched: Vec<String> = if barrel.wildcard {
+                    // Wildcard: all root_symbols are potentially in this member
+                    root_symbols.clone()
+                } else {
+                    // Named: only symbols explicitly listed in the re-export
+                    root_symbols
+                        .iter()
+                        .filter(|sym| barrel.symbols.contains(sym))
+                        .cloned()
+                        .collect()
+                };
+
+                if symbols_matched.is_empty() {
+                    continue;
+                }
+
+                // Resolve member lib.rs path and trace through its barrel
+                let member_lib = member.member_root.join("src/lib.rs");
+
+                // For wildcard barrel re-exports, also scan all member production files
+                // directly. This handles cases where `specific.rs` is NOT re-exported
+                // from lib.rs but exists as a sibling file in the member crate.
+                if barrel.wildcard {
+                    let canonical_member_root = member
+                        .member_root
+                        .canonicalize()
+                        .unwrap_or_else(|_| member.member_root.clone());
+                    let canonical_member_str = canonical_member_root.to_string_lossy().into_owned();
+                    for (prod_str, &idx) in canonical_to_idx.iter() {
+                        if prod_str.starts_with(&canonical_member_str) {
+                            let prod_path = Path::new(&mappings[idx].production_file);
+                            if self.file_exports_any_symbol(prod_path, &symbols_matched) {
+                                matched_indices.insert(idx);
+                            }
+                        }
+                    }
+                }
+
+                if let Some(resolved) = exspec_core::observe::resolve_absolute_base_to_file(
+                    self,
+                    &member_lib,
+                    canonical_root,
+                ) {
+                    // First: check if member lib.rs itself (as a production file) exports
+                    // any of the matched symbols. lib.rs can both be a barrel AND define
+                    // symbols directly (e.g., `pub struct Symbol {}` in lib.rs).
+                    if let Some(&idx) = canonical_to_idx.get(&resolved) {
+                        let prod_path = Path::new(&mappings[idx].production_file);
+                        if self.file_exports_any_symbol(prod_path, &symbols_matched) {
+                            matched_indices.insert(idx);
+                        }
+                    }
+
+                    // Then: follow barrel re-exports from member lib.rs to other files
+                    // (handles cases where lib.rs explicitly re-exports sub-modules)
+                    let mut per_member_indices = HashSet::<usize>::new();
+                    exspec_core::observe::collect_import_matches(
+                        self,
+                        &resolved,
+                        &symbols_matched,
+                        canonical_to_idx,
+                        &mut per_member_indices,
+                        canonical_root,
+                    );
+                    // Filter: only include production files that actually export matched symbols
+                    for idx in per_member_indices {
+                        let prod_path = Path::new(&mappings[idx].production_file);
+                        if self.file_exports_any_symbol(prod_path, &symbols_matched) {
                             matched_indices.insert(idx);
                         }
                     }
@@ -5143,5 +5349,522 @@ cfg_feat! {
             "Expected tests/builder/command.rs to L1.6-match to src/builder/command.rs, got: {:?}",
             sd_mapping.unwrap().test_files
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-01: pub use sibling_crate::* in root lib.rs → cross-crate barrel
+    //
+    // Given: workspace with root lib.rs containing `pub use sibling_crate::*`
+    //        and a workspace member `sibling_crate` with `pub struct Symbol`
+    // When:  test file uses `use root_crate::Symbol` and observe runs
+    // Then:  the test file is mapped to sibling_crate/src/lib.rs (or the file
+    //        that exports Symbol) via the new apply_l2_cross_crate_barrel logic
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_01_wildcard_cross_crate_barrel_maps_test_to_member() {
+        // Given: workspace structure
+        //   root/
+        //     Cargo.toml  (workspace + package "root_crate"; member: "sibling_crate")
+        //     src/lib.rs  (pub use sibling_crate::*;)
+        //     tests/test_symbol.rs  (use root_crate::Symbol;)
+        //   root/sibling_crate/
+        //     Cargo.toml  (package "sibling_crate")
+        //     src/lib.rs  (pub struct Symbol {})
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Root Cargo.toml: workspace + package
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"sibling_crate\"]\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // Root src/lib.rs: wildcard re-export
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        std::fs::write(&root_lib, "pub use sibling_crate::*;\n").unwrap();
+
+        // Root tests/test_symbol.rs: imports via root crate name
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_symbol.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::Symbol;\n#[test]\nfn test_symbol() { let _s = Symbol {}; }\n",
+        )
+        .unwrap();
+
+        // sibling_crate/Cargo.toml
+        let sib_dir = tmp.path().join("sibling_crate");
+        std::fs::create_dir_all(sib_dir.join("src")).unwrap();
+        std::fs::write(
+            sib_dir.join("Cargo.toml"),
+            "[package]\nname = \"sibling_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // sibling_crate/src/lib.rs: defines Symbol
+        let sib_lib = sib_dir.join("src").join("lib.rs");
+        std::fs::write(&sib_lib, "pub struct Symbol {}\n").unwrap();
+
+        let extractor = RustExtractor::new();
+        let sib_lib_path = sib_lib.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        let production_files = vec![sib_lib_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When: map_test_files_with_imports is called at workspace root
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: sibling_crate/src/lib.rs has test_symbol.rs in its test_files
+        let mapping = result.iter().find(|m| m.production_file == sib_lib_path);
+        assert!(
+            mapping.is_some(),
+            "No mapping entry for sibling_crate/src/lib.rs. All mappings: {:#?}",
+            result
+        );
+        assert!(
+            mapping.unwrap().test_files.contains(&test_file_path),
+            "Expected test_symbol.rs mapped to sibling_crate/src/lib.rs via CCB, \
+             but test_files: {:?}",
+            mapping.unwrap().test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-02: named cross-crate re-export → test maps to member
+    //
+    // Given: root lib.rs has `pub use sibling_crate::SpecificType` (named)
+    // When:  test uses `use root_crate::SpecificType`
+    // Then:  mapped to sibling_crate/src/lib.rs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_02_named_cross_crate_reexport_maps_test_to_member() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"sibling_crate\"]\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        // Named re-export: only SpecificType is exposed, not wildcard
+        std::fs::write(&root_lib, "pub use sibling_crate::SpecificType;\n").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_specific.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::SpecificType;\n#[test]\nfn test_it() { let _x: SpecificType = todo!(); }\n",
+        )
+        .unwrap();
+
+        let sib_dir = tmp.path().join("sibling_crate");
+        std::fs::create_dir_all(sib_dir.join("src")).unwrap();
+        std::fs::write(
+            sib_dir.join("Cargo.toml"),
+            "[package]\nname = \"sibling_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let sib_lib = sib_dir.join("src").join("lib.rs");
+        std::fs::write(&sib_lib, "pub struct SpecificType {}\n").unwrap();
+
+        let extractor = RustExtractor::new();
+        let sib_lib_path = sib_lib.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        let production_files = vec![sib_lib_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: sibling_crate/src/lib.rs has test_specific.rs in test_files
+        let mapping = result.iter().find(|m| m.production_file == sib_lib_path);
+        assert!(
+            mapping.is_some(),
+            "No mapping entry for sibling_crate/src/lib.rs. All mappings: {:#?}",
+            result
+        );
+        assert!(
+            mapping.unwrap().test_files.contains(&test_file_path),
+            "Expected test_specific.rs mapped via named CCB re-export, \
+             but test_files: {:?}",
+            mapping.unwrap().test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-03: nonexistent crate in pub use → no mapping, no panic
+    //
+    // Given: root lib.rs has `pub use nonexistent_crate::*` but that crate is
+    //        not a workspace member
+    // When:  observe runs
+    // Then:  mapping is empty (no entries), no panic
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_03_nonexistent_member_produces_empty_mapping_no_panic() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Workspace with no members listed (nonexistent_crate is not present)
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        std::fs::write(&root_lib, "pub use nonexistent_crate::*;\n").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_ghost.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::Ghost;\n#[test]\nfn test_ghost() {}\n",
+        )
+        .unwrap();
+
+        let extractor = RustExtractor::new();
+        // root_lib is the only production file (no sibling prod files)
+        let root_lib_path = root_lib.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        let production_files = vec![root_lib_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When: must not panic
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: test_ghost.rs is not mapped to any production file via CCB
+        //       (nonexistent_crate has no member → no new mapping added)
+        let ghost_mapped = result
+            .iter()
+            .any(|m| m.test_files.contains(&test_file_path));
+        assert!(
+            !ghost_mapped,
+            "test_ghost.rs should not be mapped (nonexistent_crate is not a member), \
+             but found in mappings: {:#?}",
+            result
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-04: local pub mod + cross-crate wildcard → existing L2 still works
+    //
+    // Given: root lib.rs has `pub mod local_module` (local fn) + `pub use sibling::*`
+    // When:  test imports `use root_crate::local_module::local_fn`
+    // Then:  local_module.rs is resolved by existing L2 (regression guard)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_04_local_pubmod_still_resolved_by_existing_l2() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"sibling\"]\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+
+        // root lib.rs: both pub mod (local) and pub use (cross-crate)
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        std::fs::write(&root_lib, "pub mod local_module;\npub use sibling::*;\n").unwrap();
+
+        // local_module.rs: defines local_fn
+        let local_mod = tmp.path().join("src").join("local_module.rs");
+        std::fs::write(&local_mod, "pub fn local_fn() {}\n").unwrap();
+
+        // test: imports via the local module path
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_local.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::local_module::local_fn;\n#[test]\nfn test_local_fn() { local_fn(); }\n",
+        )
+        .unwrap();
+
+        // sibling member (provides cross-crate items, not tested here)
+        let sib_dir = tmp.path().join("sibling");
+        std::fs::create_dir_all(sib_dir.join("src")).unwrap();
+        std::fs::write(
+            sib_dir.join("Cargo.toml"),
+            "[package]\nname = \"sibling\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(sib_dir.join("src").join("lib.rs"), "pub fn sib_fn() {}\n").unwrap();
+
+        let extractor = RustExtractor::new();
+        let local_mod_path = local_mod.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        let production_files = vec![local_mod_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: local_module.rs is still mapped via existing L2 (regression guard)
+        let mapping = result.iter().find(|m| m.production_file == local_mod_path);
+        assert!(
+            mapping.is_some(),
+            "No mapping entry for local_module.rs. All mappings: {:#?}",
+            result
+        );
+        assert!(
+            mapping.unwrap().test_files.contains(&test_file_path),
+            "Expected test_local.rs mapped to local_module.rs via existing L2, \
+             but test_files: {:?}",
+            mapping.unwrap().test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-05: 2-level cross-crate barrel chain (root → mid → mid/src/sub.rs)
+    //
+    // Given: root lib.rs has `pub use mid::*`, mid lib.rs has `pub use sub::*`
+    //        (wildcard re-export of sub module), mid/src/sub.rs defines MidItem
+    // When:  test uses `use root_crate::MidItem` (flat symbol via double-barrel)
+    // Then:  mapped to mid/src/sub.rs via CCB 2-level chain
+    //
+    // This is NOT resolvable by existing L2 because:
+    //   - existing cross-crate L2 resolves `use root_crate::` against mid/src/
+    //     via crate name "root_crate" or "mid", but MidItem is defined in sub.rs
+    //     and is only re-exported from mid via `pub use sub::*`
+    //   - apply_l2_cross_crate_barrel must follow mid lib.rs barrel to sub.rs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_05_two_level_cross_crate_barrel_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Root workspace: member = "mid"
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"mid\"]\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        // Level 1: root re-exports mid's public items
+        std::fs::write(&root_lib, "pub use mid::*;\n").unwrap();
+
+        // Test: imports MidItem directly from root_crate (flat access via barrel chain)
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_mid_item.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::MidItem;\n#[test]\nfn test_mid_item() { let _ = MidItem {}; }\n",
+        )
+        .unwrap();
+
+        // mid member
+        let mid_dir = tmp.path().join("mid");
+        std::fs::create_dir_all(mid_dir.join("src")).unwrap();
+        std::fs::write(
+            mid_dir.join("Cargo.toml"),
+            "[package]\nname = \"mid\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        // Level 2: mid lib.rs re-exports sub's items via wildcard
+        std::fs::write(
+            mid_dir.join("src").join("lib.rs"),
+            "pub mod sub;\npub use sub::*;\n",
+        )
+        .unwrap();
+
+        // mid/src/sub.rs: defines MidItem
+        let sub_rs = mid_dir.join("src").join("sub.rs");
+        std::fs::write(&sub_rs, "pub struct MidItem {}\n").unwrap();
+
+        let extractor = RustExtractor::new();
+        let sub_rs_path = sub_rs.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        let production_files = vec![sub_rs_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: mid/src/sub.rs has test_mid_item.rs in test_files (2-level chain resolved)
+        let mapping = result.iter().find(|m| m.production_file == sub_rs_path);
+        assert!(
+            mapping.is_some(),
+            "No mapping entry for mid/src/sub.rs. All mappings: {:#?}",
+            result
+        );
+        assert!(
+            mapping.unwrap().test_files.contains(&test_file_path),
+            "Expected test_mid_item.rs mapped to mid/src/sub.rs via 2-level CCB chain, \
+             but test_files: {:?}",
+            mapping.unwrap().test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // CCB-06: cross-crate wildcard + 50+ pub items → filter to 1 file
+    //
+    // Given: root lib.rs `pub use big_crate::*`, big_crate has 50+ pub items
+    //        spread across multiple files, but test only imports `SpecificFn`
+    // When:  observe runs with file_exports_any_symbol filter
+    // Then:  only the file that exports SpecificFn is mapped (not all 50+ files)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn ccb_06_wildcard_with_many_items_filters_to_single_file() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"big_crate\"]\n\n[package]\nname = \"root_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let root_lib = tmp.path().join("src").join("lib.rs");
+        std::fs::write(&root_lib, "pub use big_crate::*;\n").unwrap();
+
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        let test_file = tmp.path().join("tests").join("test_specific_fn.rs");
+        std::fs::write(
+            &test_file,
+            "use root_crate::SpecificFn;\n#[test]\nfn test_specific() { SpecificFn::run(); }\n",
+        )
+        .unwrap();
+
+        // big_crate: one target file + many other files
+        let big_dir = tmp.path().join("big_crate");
+        std::fs::create_dir_all(big_dir.join("src")).unwrap();
+        std::fs::write(
+            big_dir.join("Cargo.toml"),
+            "[package]\nname = \"big_crate\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        // lib.rs: exposes all items
+        let mut lib_content = String::new();
+        // 50 dummy pub items in lib.rs
+        for i in 0..50 {
+            lib_content.push_str(&format!("pub struct Item{i} {{}}\n"));
+        }
+        std::fs::write(big_dir.join("src").join("lib.rs"), &lib_content).unwrap();
+
+        // specific.rs: the one file that exports SpecificFn
+        let specific_rs = big_dir.join("src").join("specific.rs");
+        std::fs::write(
+            &specific_rs,
+            "pub struct SpecificFn;\nimpl SpecificFn { pub fn run() {} }\n",
+        )
+        .unwrap();
+
+        let extractor = RustExtractor::new();
+        let specific_rs_path = specific_rs.to_string_lossy().into_owned();
+        let test_file_path = test_file.to_string_lossy().into_owned();
+
+        // Production files: all files in big_crate/src/
+        let big_lib_path = big_dir
+            .join("src")
+            .join("lib.rs")
+            .to_string_lossy()
+            .into_owned();
+        let production_files = vec![big_lib_path.clone(), specific_rs_path.clone()];
+        let test_sources: HashMap<String, String> = [(
+            test_file_path.clone(),
+            std::fs::read_to_string(&test_file).unwrap(),
+        )]
+        .into_iter()
+        .collect();
+
+        // When
+        let result = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: specific.rs has test_specific_fn.rs in test_files
+        let specific_mapping = result
+            .iter()
+            .find(|m| m.production_file == specific_rs_path);
+        assert!(
+            specific_mapping.is_some(),
+            "No mapping entry for big_crate/src/specific.rs. All mappings: {:#?}",
+            result
+        );
+        assert!(
+            specific_mapping
+                .unwrap()
+                .test_files
+                .contains(&test_file_path),
+            "Expected test_specific_fn.rs mapped to specific.rs via CCB + symbol filter, \
+             but test_files: {:?}",
+            specific_mapping.unwrap().test_files
+        );
+
+        // And: big_crate/src/lib.rs does NOT have test_specific_fn.rs in test_files
+        // (symbol filter should prevent fan-out to lib.rs which has no SpecificFn)
+        let lib_mapping = result.iter().find(|m| m.production_file == big_lib_path);
+        if let Some(lib_m) = lib_mapping {
+            assert!(
+                !lib_m.test_files.contains(&test_file_path),
+                "test_specific_fn.rs should NOT be fan-out mapped to big_crate/src/lib.rs \
+                 (which does not export SpecificFn), but found in: {:?}",
+                lib_m.test_files
+            );
+        }
     }
 }
