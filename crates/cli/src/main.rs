@@ -705,6 +705,34 @@ fn extract_class_name(path: &str) -> String {
         .to_string()
 }
 
+fn has_common_directory_segment(path_a: &str, path_b: &str) -> bool {
+    let generic: &[&str] = &[
+        "src",
+        "tests",
+        "test",
+        "lib",
+        "app",
+        "vendor",
+        "node_modules",
+    ];
+
+    let segments_a: std::collections::HashSet<String> = Path::new(path_a)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .map(|s| s.to_lowercase())
+        .filter(|s| !generic.contains(&s.as_str()) && s.len() > 2)
+        .collect();
+
+    let segments_b: std::collections::HashSet<String> = Path::new(path_b)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .map(|s| s.to_lowercase())
+        .filter(|s| !generic.contains(&s.as_str()) && s.len() > 2)
+        .collect();
+
+    !segments_a.is_disjoint(&segments_b)
+}
+
 fn apply_fan_out_filter(
     file_mappings: &mut [exspec_core::observe::FileMapping],
     total_test_files: usize,
@@ -718,9 +746,14 @@ fn apply_fan_out_filter(
         let fan_out = mapping.test_files.len() as f64 / total_test_files as f64;
         if fan_out > threshold {
             let prod_class = extract_class_name(&mapping.production_file).to_lowercase();
+            let prod_file = mapping.production_file.clone();
             mapping.test_files.retain(|test_file| {
                 let test_stem = extract_class_name(test_file).to_lowercase();
                 test_stem.contains(&prod_class)
+                    || (prod_class.len() > 3
+                        && test_stem.len() > 3
+                        && prod_class.contains(&test_stem))
+                    || has_common_directory_segment(test_file, &prod_file)
             });
         }
     }
@@ -762,7 +795,9 @@ fn apply_reverse_fan_out_filter(
             if prod_stem.is_empty() || test_stem.is_empty() {
                 return false;
             }
-            test_stem.contains(&prod_stem) || prod_stem.contains(&test_stem)
+            test_stem.contains(&prod_stem)
+                || prod_stem.contains(&test_stem)
+                || has_common_directory_segment(test_file, &mapping.production_file)
         });
     }
 }
@@ -2776,6 +2811,290 @@ test('GET returns array', async () => {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // FO-01 to FO-INT-02: fan-out filter name-match exemption improvement
+    // Cycle: docs/cycles/20260325_1651_fan-out-filter-name-match-exemption.md
+    // -----------------------------------------------------------------------
+
+    // FO-01: forward filter KEEPS test when directory segment matches
+    // has_common_directory_segment は未実装 → RED
+    #[test]
+    fn fo_01_forward_filter_keeps_test_with_matching_directory_segment() {
+        // Given: prod fan-out > threshold (20% > 5%)
+        //   production_file = "src/Illuminate/Auth/Guard.php"     (dir segment: "auth")
+        //   test_file       = "tests/Auth/AuthGuardTest.php"       (dir segment: "auth")
+        //   name match: "authguardtest".contains("guard") = TRUE (forward already OK for this case)
+        //   Use a case where name fails but dir succeeds:
+        //   production_file = "src/Illuminate/Auth/AuthenticationException.php"  prod_class="authenticationexception"
+        //   test_file       = "tests/Auth/AuthGuardTest.php"  test_stem="authguardtest"
+        //   forward: "authguardtest".contains("authenticationexception") = FALSE
+        //   dir match NEW: both have "auth" → KEPT
+        let mut mappings = vec![exspec_core::observe::FileMapping {
+            production_file: "src/Illuminate/Auth/AuthenticationException.php".to_string(),
+            test_files: vec![
+                "tests/Auth/AuthGuardTest.php".to_string(),
+                "tests/Unit/OtherTest.php".to_string(),
+            ],
+            strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+        }];
+        // fan-out: 2/10 = 20% > 5% → filter triggers
+        // prod_class = "authenticationexception"
+        // AuthGuardTest: "authguardtest".contains("authenticationexception") = FALSE
+        //   dir match: prod has "Auth", test has "Auth" → should be KEPT
+        // OtherTest: no name match, no dir match → REMOVED
+        apply_fan_out_filter(&mut mappings, 10, 5.0);
+        assert!(
+            mappings[0]
+                .test_files
+                .contains(&"tests/Auth/AuthGuardTest.php".to_string()),
+            "AuthGuardTest.php should be KEPT via directory segment 'auth' match, got: {:?}",
+            mappings[0].test_files
+        );
+        assert!(
+            !mappings[0]
+                .test_files
+                .contains(&"tests/Unit/OtherTest.php".to_string()),
+            "OtherTest.php should be REMOVED (no name or dir match), got: {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // FO-02: forward filter REMOVES test when directory segment does NOT match (guard test → PASS)
+    #[test]
+    fn fo_02_forward_filter_removes_test_with_no_directory_match() {
+        // Given: prod fan-out > threshold
+        //   production_file = "src/Illuminate/Auth/Guard.php"    prod_class = "guard"
+        //   test_file       = "tests/Unit/DatabaseTest.php"       test_stem  = "databasetest"
+        //   name: "databasetest".contains("guard") = FALSE
+        //   dir: "Unit" vs "Auth" → no match
+        // When: apply_fan_out_filter with threshold 5%
+        // Then: DatabaseTest.php is REMOVED
+        let mut mappings = vec![exspec_core::observe::FileMapping {
+            production_file: "src/Illuminate/Auth/Guard.php".to_string(),
+            test_files: vec!["tests/Unit/DatabaseTest.php".to_string()],
+            strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+        }];
+        apply_fan_out_filter(&mut mappings, 10, 5.0);
+        assert!(
+            mappings[0].test_files.is_empty(),
+            "DatabaseTest.php should be REMOVED (no name or dir match), got: {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // FO-03: forward filter KEEPS test via bidirectional stem match (prod_class contains test_stem)
+    // 未実装 → RED
+    #[test]
+    fn fo_03_forward_filter_keeps_test_via_bidirectional_stem_match() {
+        // Given: prod fan-out > threshold
+        //   production_file = "src/io/async_read.rs"    prod_class = "async_read"
+        //   test_file       = "tests/io/read.rs"         test_stem  = "read"
+        //   forward (current): "read".contains("async_read") = FALSE → REMOVED
+        //   bidirectional NEW: "async_read".contains("read") = TRUE → should be KEPT
+        let mut mappings = vec![exspec_core::observe::FileMapping {
+            production_file: "src/io/async_read.rs".to_string(),
+            test_files: vec![
+                "tests/io/read.rs".to_string(),
+                "tests/other/unrelated.rs".to_string(),
+            ],
+            strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+        }];
+        // fan-out: 2/10 = 20% > 5% → filter triggers
+        // prod_class = "async_read"
+        // "read.rs" → test_stem = "read" (len=4, not short)
+        //   forward: "read".contains("async_read") = FALSE
+        //   bidirectional NEW: "async_read".contains("read") = TRUE → KEPT
+        // "unrelated.rs" → test_stem = "unrelated"
+        //   neither direction matches → REMOVED
+        apply_fan_out_filter(&mut mappings, 10, 5.0);
+        assert!(
+            mappings[0]
+                .test_files
+                .contains(&"tests/io/read.rs".to_string()),
+            "tests/io/read.rs should be KEPT via bidirectional match ('async_read' contains 'read'), got: {:?}",
+            mappings[0].test_files
+        );
+        assert!(
+            !mappings[0]
+                .test_files
+                .contains(&"tests/other/unrelated.rs".to_string()),
+            "unrelated.rs should be REMOVED, got: {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // FO-04: reverse filter KEEPS mapping when directory segment matches
+    // has_common_directory_segment は未実装 → RED
+    #[test]
+    fn fo_04_reverse_filter_keeps_mapping_with_matching_directory_segment() {
+        // Given: test "tests/Database/EloquentIntegrationTest.php" maps to >threshold prod files
+        //   including "src/Illuminate/Database/Eloquent/Model.php" (dir segment "database" matches)
+        // When: apply_reverse_fan_out_filter with threshold=5
+        // Then: Model.php retains EloquentIntegrationTest.php (dir segment match)
+        //       Request.php removes it (no dir/name match)
+        let prod_files = [
+            "src/Illuminate/Database/Eloquent/Model.php",
+            "src/Illuminate/Database/Query/Builder.php",
+            "src/Illuminate/Http/Request.php",
+            "src/Illuminate/Auth/Guard.php",
+            "src/Illuminate/Routing/Router.php",
+            "src/Illuminate/Support/Collection.php",
+        ];
+        let mut mappings: Vec<exspec_core::observe::FileMapping> = prod_files
+            .iter()
+            .map(|prod| exspec_core::observe::FileMapping {
+                production_file: prod.to_string(),
+                test_files: vec!["tests/Database/EloquentIntegrationTest.php".to_string()],
+                strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+            })
+            .collect();
+        // fan-in: 6 > threshold=5 → filter triggers for EloquentIntegrationTest.php
+        // Model.php: prod_stem="model", test_stem="eloquentintegrationtest"
+        //   name: "eloquentintegrationtest".contains("model") = FALSE; "model".contains("...") = FALSE
+        //   dir NEW: prod has "Database", test has "Database" → KEPT
+        // Request.php: prod has "Http", test has "Database" → no dir match, no name match → REMOVED
+        apply_reverse_fan_out_filter(&mut mappings, 5);
+        let model_mapping = mappings
+            .iter()
+            .find(|m| m.production_file == "src/Illuminate/Database/Eloquent/Model.php")
+            .expect("Model.php mapping should exist");
+        assert!(
+            model_mapping
+                .test_files
+                .contains(&"tests/Database/EloquentIntegrationTest.php".to_string()),
+            "Model.php should KEEP EloquentIntegrationTest.php via dir segment 'database', got: {:?}",
+            model_mapping.test_files
+        );
+        let request_mapping = mappings
+            .iter()
+            .find(|m| m.production_file == "src/Illuminate/Http/Request.php")
+            .expect("Request.php mapping should exist");
+        assert!(
+            !request_mapping
+                .test_files
+                .contains(&"tests/Database/EloquentIntegrationTest.php".to_string()),
+            "Request.php should REMOVE EloquentIntegrationTest.php (no dir/name match), got: {:?}",
+            request_mapping.test_files
+        );
+    }
+
+    // FO-05: generic segments (src, tests) do NOT count as directory match (guard test → PASS)
+    #[test]
+    fn fo_05_generic_directory_segments_are_not_matched() {
+        // Given: prod fan-out > threshold
+        //   production_file = "src/Connection.php"        dir segments: ["src"]  (generic)
+        //   test_file       = "tests/SomeOtherTest.php"   dir segments: ["tests"] (generic)
+        //   name: "someothertest".contains("connection") = FALSE
+        //   dir: "src" and "tests" are generic → should NOT match → REMOVED
+        let mut mappings = vec![exspec_core::observe::FileMapping {
+            production_file: "src/Connection.php".to_string(),
+            test_files: vec!["tests/SomeOtherTest.php".to_string()],
+            strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+        }];
+        apply_fan_out_filter(&mut mappings, 10, 5.0);
+        assert!(
+            mappings[0].test_files.is_empty(),
+            "SomeOtherTest.php should be REMOVED (generic segments src/tests must not match), got: {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // FO-W2: short test_stem (len <= 3) must NOT trigger prod_class.contains(&test_stem) (FP guard)
+    #[test]
+    fn fo_w2_short_test_stem_does_not_cause_false_positive_in_bidirectional_match() {
+        // Given: prod fan-out > threshold
+        //   production_file = "src/async_io/async_io_driver.rs"  prod_class = "async_io_driver"
+        //   test "tests/io.rs": test_stem = "io" (len=2, SHORT ≤ 3)
+        //     bidirectional naive: "async_io_driver".contains("io") = TRUE → FP!
+        //     guard: len("io") <= 3 → skip bidirectional → REMOVED
+        //   test "tests/io_driver.rs": test_stem = "io_driver" (len=9, not short)
+        //     forward: "io_driver".contains("async_io_driver") = FALSE
+        //     bidirectional: "async_io_driver".contains("io_driver") = TRUE → KEPT
+        let mut mappings = vec![exspec_core::observe::FileMapping {
+            production_file: "src/async_io/async_io_driver.rs".to_string(),
+            test_files: vec!["tests/io.rs".to_string(), "tests/io_driver.rs".to_string()],
+            strategy: exspec_core::observe::MappingStrategy::ImportTracing,
+        }];
+        // fan-out: 2/10 = 20% > 5% → filter triggers
+        apply_fan_out_filter(&mut mappings, 10, 5.0);
+        // Key assertion: short stem "io" must NOT be kept via bidirectional (FP guard)
+        assert!(
+            !mappings[0]
+                .test_files
+                .contains(&"tests/io.rs".to_string()),
+            "tests/io.rs should be REMOVED: short stem 'io' (len=2) must not trigger bidirectional match, got: {:?}",
+            mappings[0].test_files
+        );
+    }
+
+    // FO-INT-01: Laravel observe recall > 85% after fix (integration, requires /tmp/laravel)
+    #[test]
+    #[ignore = "integration test: requires /tmp/laravel and built binary"]
+    fn fo_int_01_laravel_observe_recall_above_85_percent() {
+        // Given: /tmp/laravel exists with Laravel framework source
+        // When: cargo run -- observe --lang php --format json /tmp/laravel
+        // Then: recall > 85%
+        let output = std::process::Command::new("cargo")
+            .args([
+                "run",
+                "--",
+                "observe",
+                "--lang",
+                "php",
+                "--format",
+                "json",
+                "/tmp/laravel",
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR").replace("/crates/cli", ""))
+            .output()
+            .expect("failed to run cargo run");
+        assert!(output.status.success(), "cargo run failed: {:?}", output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("output should be valid JSON");
+        let recall = parsed["summary"]["recall"]
+            .as_f64()
+            .expect("recall should be a number");
+        assert!(
+            recall > 0.85,
+            "Laravel recall should be > 85%, got {:.1}%",
+            recall * 100.0
+        );
+    }
+
+    // FO-INT-02: tokio observe recall >= 50.8% (regression guard)
+    #[test]
+    #[ignore = "integration test: requires /tmp/exspec-dogfood/tokio and built binary"]
+    fn fo_int_02_tokio_observe_recall_no_regression() {
+        // Given: /tmp/exspec-dogfood/tokio exists
+        // When: cargo run -- observe --lang rust --format json /tmp/exspec-dogfood/tokio
+        // Then: recall >= 50.8% (no regression from v0.4.5-dev baseline)
+        let tokio_path = if std::path::Path::new("/tmp/exspec-dogfood/tokio").exists() {
+            "/tmp/exspec-dogfood/tokio"
+        } else {
+            "/private/tmp/exspec-dogfood/tokio"
+        };
+        let output = std::process::Command::new("cargo")
+            .args([
+                "run", "--", "observe", "--lang", "rust", "--format", "json", tokio_path,
+            ])
+            .current_dir(env!("CARGO_MANIFEST_DIR").replace("/crates/cli", ""))
+            .output()
+            .expect("failed to run cargo run");
+        assert!(output.status.success(), "cargo run failed: {:?}", output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&stdout).expect("output should be valid JSON");
+        let recall = parsed["summary"]["recall"]
+            .as_f64()
+            .expect("recall should be a number");
+        assert!(
+            recall >= 0.508,
+            "tokio recall should be >= 50.8% (regression guard), got {:.1}%",
+            recall * 100.0
+        );
     }
 
     // --- extract_class_name ---
