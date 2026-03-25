@@ -125,6 +125,14 @@ pub fn is_non_sut_helper(file_path: &str, is_known_production: bool) -> bool {
         return true;
     }
 
+    // Fixtures and Stubs directories under tests/ are test infrastructure, not SUT
+    let lower = normalized.to_lowercase();
+    if (lower.contains("/tests/fixtures/") || lower.starts_with("tests/fixtures/"))
+        || (lower.contains("/tests/stubs/") || lower.starts_with("tests/stubs/"))
+    {
+        return true;
+    }
+
     // Kernel.php
     if file_name == "Kernel.php" {
         return true;
@@ -139,6 +147,48 @@ pub fn is_non_sut_helper(file_path: &str, is_known_production: bool) -> bool {
     }
 
     false
+}
+
+// ---------------------------------------------------------------------------
+// PSR-4 prefix resolution
+// ---------------------------------------------------------------------------
+
+/// Load PSR-4 namespace prefix -> directory mappings from composer.json.
+/// Returns a map of namespace prefix (trailing `\` stripped) -> directory (trailing `/` stripped).
+/// Returns an empty map if composer.json is absent or unparseable.
+pub fn load_psr4_prefixes(scan_root: &Path) -> HashMap<String, String> {
+    let composer_path = scan_root.join("composer.json");
+    let content = match std::fs::read_to_string(&composer_path) {
+        Ok(s) => s,
+        Err(_) => return HashMap::new(),
+    };
+    let value: serde_json::Value = match serde_json::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return HashMap::new(),
+    };
+
+    let mut result = HashMap::new();
+
+    // Parse both autoload and autoload-dev psr-4 sections
+    for section in &["autoload", "autoload-dev"] {
+        if let Some(psr4) = value
+            .get(section)
+            .and_then(|a| a.get("psr-4"))
+            .and_then(|p| p.as_object())
+        {
+            for (ns, dir) in psr4 {
+                // Strip trailing backslash from namespace prefix
+                let ns_key = ns.trim_end_matches('\\').to_string();
+                // Strip trailing slash from directory
+                let dir_val = dir.as_str().unwrap_or("").trim_end_matches('/').to_string();
+                if !ns_key.is_empty() {
+                    result.insert(ns_key, dir_val);
+                }
+            }
+        }
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +503,9 @@ impl PhpExtractor {
             .flat_map(|s| s.iter().cloned())
             .collect();
 
+        // Load PSR-4 prefix mappings from composer.json (e.g., "MyApp" -> "custom_src")
+        let psr4_prefixes = load_psr4_prefixes(scan_root);
+
         // Layer 2: PSR-4 convention import resolution
         // Use raw imports (unfiltered) and apply scan_root-aware external filtering
         for (test_file, source) in test_sources {
@@ -473,11 +526,16 @@ impl PhpExtractor {
                 // Strategy: strip the first segment (PSR-4 prefix like "App")
                 // and search for the remaining path under common directories.
                 let parts: Vec<&str> = module_path.splitn(2, '/').collect();
+                let first_segment = parts[0];
                 let path_without_prefix = if parts.len() == 2 {
                     parts[1]
                 } else {
-                    module_path
+                    module_path.as_str()
                 };
+
+                // Check if first segment matches a PSR-4 prefix from composer.json
+                // e.g., "MyApp" -> "custom_src" means resolve under custom_src/
+                let psr4_dir = psr4_prefixes.get(first_segment);
 
                 // Derive the PHP file name from the last segment of module_path
                 // e.g., `App/Models` -> last segment is `Models` -> file is `Models.php`
@@ -489,6 +547,21 @@ impl PhpExtractor {
                 // We need to get the symbols too
                 for symbol in _symbols {
                     let file_name = format!("{symbol}.php");
+
+                    // If composer.json defines a PSR-4 mapping for this namespace prefix,
+                    // try the mapped directory first.
+                    if let Some(psr4_base) = psr4_dir {
+                        let candidate = canonical_root
+                            .join(psr4_base)
+                            .join(path_without_prefix)
+                            .join(&file_name);
+                        if let Ok(canonical_candidate) = candidate.canonicalize() {
+                            let candidate_str = canonical_candidate.to_string_lossy().into_owned();
+                            if let Some(&idx) = canonical_to_idx.get(&candidate_str) {
+                                matched_indices.insert(idx);
+                            }
+                        }
+                    }
 
                     // Try: <scan_root>/<common_prefix>/<path_without_prefix>/<symbol>.php
                     let common_prefixes = ["src", "app", "lib", ""];
@@ -1184,6 +1257,118 @@ mod tests {
                 .any(|t| t.contains("RequestTest.php")),
             "expected RequestTest.php to be mapped to Request.php via Layer 2, got: {:?}",
             request_mapping.test_files
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-06: tests/Fixtures/SomeHelper.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_06_fixtures_dir() {
+        // Given: a file in tests/Fixtures/
+        // When: is_non_sut_helper is called
+        // Then: returns true (Fixtures are test infrastructure, not SUT)
+        assert!(is_non_sut_helper("tests/Fixtures/SomeHelper.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-07: tests/Fixtures/nested/Stub.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_07_fixtures_nested() {
+        // Given: a file in tests/Fixtures/nested/
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("tests/Fixtures/nested/Stub.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-08: tests/Stubs/UserStub.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_08_stubs_dir() {
+        // Given: a file in tests/Stubs/
+        // When: is_non_sut_helper is called
+        // Then: returns true (Stubs are test infrastructure, not SUT)
+        assert!(is_non_sut_helper("tests/Stubs/UserStub.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-09: tests/Stubs/nested/FakeRepo.php -> is_non_sut_helper = true
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_09_stubs_nested() {
+        // Given: a file in tests/Stubs/nested/
+        // When: is_non_sut_helper is called
+        // Then: returns true
+        assert!(is_non_sut_helper("tests/Stubs/nested/FakeRepo.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-HELPER-10: app/Stubs/Template.php -> is_non_sut_helper = false (guard test)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_helper_10_non_test_stubs() {
+        // Given: a file in app/Stubs/ (not under tests/)
+        // When: is_non_sut_helper is called
+        // Then: returns false (only tests/ subdirs are filtered)
+        assert!(!is_non_sut_helper("app/Stubs/Template.php", false));
+    }
+
+    // -----------------------------------------------------------------------
+    // PHP-PSR4-01: custom_src/ prefix via composer.json -> resolution success
+    // -----------------------------------------------------------------------
+    #[test]
+    fn php_psr4_01_composer_json_resolution() {
+        // Given: a project with composer.json defining PSR-4 autoload:
+        //   {"autoload": {"psr-4": {"MyApp\\": "custom_src/"}}}
+        //   production file: custom_src/Models/Order.php
+        //   test file: tests/OrderTest.php with `use MyApp\Models\Order;`
+        // When: map_test_files_with_imports is called
+        // Then: OrderTest.php is matched to Order.php via PSR-4 resolution
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let custom_src_dir = dir.path().join("custom_src").join("Models");
+        std::fs::create_dir_all(&custom_src_dir).unwrap();
+        let test_dir = dir.path().join("tests");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        // Write composer.json with custom PSR-4 prefix
+        let composer_json = r#"{"autoload": {"psr-4": {"MyApp\\": "custom_src/"}}}"#;
+        std::fs::write(dir.path().join("composer.json"), composer_json).unwrap();
+
+        let prod_file = custom_src_dir.join("Order.php");
+        std::fs::write(
+            &prod_file,
+            "<?php\nnamespace MyApp\\Models;\nclass Order {}",
+        )
+        .unwrap();
+
+        let test_file = test_dir.join("OrderTest.php");
+        let test_source = "<?php\nuse MyApp\\Models\\Order;\nclass OrderTest extends TestCase {}";
+        std::fs::write(&test_file, test_source).unwrap();
+
+        let ext = PhpExtractor::new();
+        let production_files = vec![prod_file.to_string_lossy().into_owned()];
+        let mut test_sources = HashMap::new();
+        test_sources.insert(
+            test_file.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let mappings =
+            ext.map_test_files_with_imports(&production_files, &test_sources, dir.path(), false);
+
+        let order_mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("Order.php"))
+            .expect("expected Order.php in mappings");
+        assert!(
+            order_mapping
+                .test_files
+                .iter()
+                .any(|t| t.contains("OrderTest.php")),
+            "expected OrderTest.php to be mapped to Order.php via PSR-4 composer.json resolution, got: {:?}",
+            order_mapping.test_files
         );
     }
 
