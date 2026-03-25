@@ -9,53 +9,48 @@
 
 ## Now
 
-### v0.5.0: Rust observe ship criteria PASS (tower)
+### v0.5.x: Internal dogfooding + precision/recall improvement
 
-Goal: Rust observe を tower (normal-case library) で ship criteria PASS にする。#199 barrel self-match fix で達成。
+Goal: 自社プロダクト (private) で dogfooding し、実用上の FP/FN を発見・修正する。OSS 公開 library (NestJS, httpx, Laravel, tower) では見つからなかったパターンを検出し、precision/recall を向上。
 
-**Current observe status (2026-03-25 post-#199)**:
+**v0.5.0 observe status (released 2026-03-25)**:
 
-| Language | Precision | Recall | GT corpus | Status | Ship criteria |
-|----------|-----------|--------|-----------|--------|---------------|
-| TypeScript | 100% | 91% | NestJS (77-pair) | **stable** | PASS |
-| Python | 98.2% | 96.8% | httpx (30 files) | **stable** | PASS |
-| Rust | 100% | **91.7%** (tower) / 50.8% (tokio) / 14.3% (clap) | tower (24-file, post-#199) / tokio (52-file) / clap (91-file) | **stable** (tower) / experimental (tokio/clap) | tower: PASS. tokio/clap: hard-case P PASS R FAIL |
-| PHP | ~100% | 88.6% (post-#193/#194) | Laravel (912 files, 45-pair GT) | **stable** | PASS (per-language: P>=98%, R>=85%) |
+| Language | Precision | Recall | GT corpus | Status |
+|----------|-----------|--------|-----------|--------|
+| TypeScript | 100% | 91% | NestJS (77-pair) | **stable** |
+| Python | 98.2% | 96.8% | httpx (30 files) | **stable** |
+| Rust | 100% | 91.7% (tower) | tower (24-file) | **stable** |
+| PHP | ~100% | 88.6% | Laravel (912 files, 45-pair) | **stable** |
 
 | Priority | Task | Type | Expected Impact |
 |----------|------|------|-----------------|
-| P2 | Rust crate root barrel re-export resolution | observe recall | tokio/clap の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
+| P1 | Internal project dogfooding (lint + observe, 4 languages) | quality | 実用上の FP/FN を発見。real-world precision 向上 |
+| P2 | FP/FN fix patches (dogfooding 結果による) | lint/observe | dogfooding で発見した問題の修正。v0.5.1+ |
+| P2 | `exspec init` (framework detection + auto-config) | onboarding | ユーザー獲得の摩擦削減 |
 
-**#199 barrel self-match fix (2026-03-25)**: tower R=78.3% → 91.7% (22/24 GT scope)。4 FN resolved: filter/async_filter, hedge/main, steer/main, util/call_all。mod.rs ファイルを mappable production file として認識するよう修正。tokio: 210 → 239 mapped test files (+29, no regression)。
+**Why internal dogfooding**: OSS library での dogfooding は「ライブラリ作者のテスト」を評価する。自社プロダクトは「アプリケーション開発者のテスト」であり、exspec のターゲットユーザーにより近い。パターンの多様性が異なる可能性がある。
 
-**tower GT 結論 post-#199 (2026-03-25)**: tower (commit 251296d) は ship criteria PASS。P=100% PASS, R=91.7% PASS。残り 2 FN: tower-test/tests/mock.rs (cross-crate), limit/concurrency.rs (deep mod hierarchy)。いずれも structural FN。
-
-**Decision (2026-03-25)**: tower は Rust observe の normal-case ship criteria benchmark として確定。Rust observe は tower で stable。tokio/clap は引き続き hard-case experimental。"No library achieves R>=90%" は #199 で解消された。
-
-**clap GT 結論 (2026-03-25)**: clap (commit 70f3bb3) は normal-case library ではなかった。R=14.3% (13/91)。FN の主因は tokio と同じ crate root barrel。clap も「hard case」として分類。
-
-**Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。tower が best-surveyed library として新しい baseline。
-
-**PHP re-dogfood 結果 (2026-03-25)**: #193/#194 実装後の実測。R=88.6% (808/912)。P=~100% (PASS)。fan-out filter blocked 0 files。残り 104 FN は structural ceiling (AbstractBladeTestCase 54 / string-literal-use 28 / IoC helper 10 / other 12)。R=88.6% は現アプローチの上限。
-
-**Decision (2026-03-25)**: PHP R=88.6% accepted as stable. Per-language ship criteria introduced: PHP R>=85% (vs default R>=90%). Rationale: remaining 104 FN are all parent class inheritance / IoC resolution / string literal patterns — unreachable by static import tracing. The 1.4pp gap is structural, not a quality issue. CONSTITUTION updated.
-
-**新言語 (Go) は deferred**: CONSTITUTION が「4 languages」と定義。observe の 4 言語 stabilization が優先。Go は observe multi-language の価値が証明された後に検討。
+**Decision**: 結果は anonymized (project-A, project-B 等) で dogfooding-results.md に記録。プライベートプロジェクト名は OSS docs に含めない。
 
 ## Backlog
 
 | Priority | Task | Trigger |
 |----------|------|---------|
+| P2 | #153 Cross-file 1-hop helper delegation | lint BLOCK FP + PHP recall。dogfooding で FP が目立てば優先度上げ |
 | P2 | Multi-path CLI for observe (B2 cross-package resolution) | 13 FN in NestJS, all B2 |
-| P2 | `exspec init` (framework detection + auto-config) | User onboarding friction |
 | P2 | #127 Python barrel suppression per-(test, prod) scope | Precision refinement |
-| P2 | #153 Cross-file 1-hop helper delegation | lint BLOCK FP。observe precision 完了後に再評価 (v0.4.3 で defer 確定) |
-| P3 | Rust tokio recall: remaining 29 FN (inline tests, cross-crate) | tokio hard-case improvement。ship criteria には不要 |
+| P2 | Rust crate root barrel re-export resolution | tokio/clap hard-case improvement。ship criteria には不要 |
+| P2 | GitHub Action marketplace | CI 統合。ユーザー獲得 |
 | P3 | #93 PHP PSR-4 multi-segment namespace resolution | GT audit FP にmulti-segment起因なし |
 | P3 | #132 Phase 19 DISCOVERED (performance, maintainability) | Internal cleanup |
 | P3 | #113/#114/#115 Refactoring (cached_query, dedup, trait) | Internal cleanup |
+| P3 | Go language support (lint) | After dogfooding proves demand |
 
 ## Completed Recently
+
+### v0.5.0 released (2026-03-25)
+
+Observe multi-language stabilization. All 4 languages ship-criteria PASS. 17-library Rust survey. Barrel self-match fix. 1237 tests. Published to crates.io.
 
 ### #199: Barrel self-match fix -- Rust observe ship criteria PASS (2026-03-25)
 
