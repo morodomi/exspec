@@ -48,6 +48,21 @@ observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). R
 | #183 - Reverse fan-out filter for barrel import precision | **DONE** |
 | GT update - secondary targets + io_driver scope exclusion | **DONE** |
 | #185 - L1.5 underscore-to-path stem matching | **DONE** |
+| clap GT - Rust observe multi-library dogfooding (clap) | **DONE** |
+
+### clap GT: Rust Observe P=100%, R=14.3% (2026-03-25)
+
+clap (commit 70f3bb3) against exspec observe. GT scope: 91 test files.
+
+| Metric | Value | Target |
+|--------|-------|--------|
+| Precision | **100%** | >= 98% |
+| Recall | **14.3%** (13/91) | >= 90% |
+| TP | 13 | - |
+| FP | 0 | 0 |
+| FN | 78 | - |
+
+**Conclusion**: clap is NOT a normal-case library. Dominant FN cause: crate root barrel re-export (`use clap::Arg` → barrel chain). Same hard-case pattern as tokio. Ship criterion R >= 90% NOT met. See `docs/observe-ground-truth-rust-clap.md`.
 
 ### Post-#185: Rust Observe P=100%, R=50.8% (2026-03-25)
 

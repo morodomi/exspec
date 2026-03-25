@@ -24,16 +24,15 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 
 | Priority | Task | Type | Expected Impact |
 |----------|------|------|-----------------|
-| P1 | Rust multi-library dogfooding (clap or serde) | observe validation | normal-case R 測定。tokio は workspace+barrel の hard case。single-crate library で R>=90% なら ship 可能 |
 | P1 | PHP recall push (R=85.1% → 90%) + re-audit | observe recall | ship criteria 達成まで残り ~5pp |
 | P2 | PHP Str.php FP resolution | observe precision | PHP P 96.0% → >=98% (fan-out name-match #173 で一部解消済み) |
+| P2 | Rust crate root barrel re-export resolution | observe recall | clap/tokio の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
 
-**Why Rust R=50.8% is misleading**: tokio GT の 29 FN の内訳:
-- `tokio::` barrel import (external crate re-export): ~6 → single-crate では発生しない
-- inline src/tests/ (loom): ~5 → tokio 固有の並行テスト手法
-- cross-crate (tokio-stream/util): ~4 → workspace 固有
-- no use statement / proc macro: ~4 → edge case
-- other (name mismatch): ~10 → 一部は L1.5 で解消済み
+**Why Rust R=50.8% (tokio) / 14.3% (clap) is low**: dominant FN cause は crate root barrel re-export (`use clap::Arg`, `use tokio::sync::broadcast`)。observe は multi-hop re-export chain を追跡できない。この制約は両 library で共通。
+
+**clap GT 結論 (2026-03-25)**: clap (commit 70f3bb3) は normal-case library ではなかった。R=14.3% (13/91)。FN の主因は tokio と同じ crate root barrel。clap も「hard case」として分類。
+
+**Decision**: ship 判定には crate root barrel を使わない library (e.g., 自分自身のサブモジュールを直接 import する library) が必要。現時点では該当 library が見つかっていない。Rust observe の ship は保留。tokio R (50.8%) と clap R (14.3%) はいずれも参考値。
 
 **Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。
 
@@ -216,7 +215,7 @@ Route extraction (NestJS, FastAPI, Next.js, Django). TS re-dogfood (P=100%, R=91
 - **Post-processing filters**: forward fan-out (prod→test) + reverse fan-out (test→prod, #183)
 - **Success bar**: Ship criteria P>=98%, R>=90% per language, measured on representative GT corpus
 - **GT corpus strategy**: Each language needs at least one "normal case" library. Hard-case (workspace, barrel-heavy) projects are reference baselines, not ship-criteria benchmarks
-- **Current status**: TypeScript (P=100%, R=91%, stable). Python (P=98.2%, R=96.8%, stable). Rust (P=100%, R=50.8% on tokio hard-case, experimental -- needs normal-case library). PHP (P~100%, R=85.1%, experimental)
+- **Current status**: TypeScript (P=100%, R=91%, stable). Python (P=98.2%, R=96.8%, stable). Rust (P=100%, R=50.8% tokio / 14.3% clap, both hard-case, experimental -- crate root barrel FN blocking ship). PHP (P~100%, R=85.1%, experimental)
 
 ### B4 barrel fix rejection (Phase 11)
 
