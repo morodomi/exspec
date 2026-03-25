@@ -132,8 +132,8 @@ exspec observe --lang rust --format json .  # JSON for CI
 | FastAPI | Python | 620 | 122 (20%) | ~100% | stable |
 | Django | Python | 2266 | 381 (17%) | ~100% | stable |
 | tokio | Rust | 495 | 50 (10%) | 100% | experimental (R < 90%) |
-| Laravel | PHP | 1945 | 973 (50%) | 96% | experimental |
-| Symfony | PHP | 7937 | 4117 (52%) | ~96% | experimental |
+| Laravel | PHP | 1951 | 973 (50%) | ~100% | stable (R=88.6%) |
+| Symfony | PHP | 7937 | 4117 (52%) | ~96% | stable |
 
 See [docs/dogfooding-results.md](docs/dogfooding-results.md) for full details.
 

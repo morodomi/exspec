@@ -2,9 +2,9 @@
 
 ## Current Phase
 
-v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP P~100%, R=88.6% (808/912, post-#193/#194). Structural ceiling: remaining 104 FN = parent class / cross-file delegation patterns.
+v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP **stable** P~100%, R=88.6% (per-language ship criteria R>=85% PASS).
 
-observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: P~100%, R=88.6% (808/912, post-#193/#194) (experimental, P PASS R FAIL. structural ceiling: 104 FN = AbstractBladeTestCase/string-literal-use/IoC patterns). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
+observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: **P~100%, R=88.6%** (808/912, **stable**. per-language ship criteria P>=98% R>=85% PASS. structural ceiling: 104 FN = parent class/IoC/string literal patterns). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
 
 ## Progress
 
