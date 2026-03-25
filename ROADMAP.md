@@ -19,12 +19,12 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 |----------|-----------|--------|-----------|--------|---------------|
 | TypeScript | 100% | 91% | NestJS (77-pair) | **stable** | PASS |
 | Python | 98.2% | 96.8% | httpx (30 files) | **stable** | PASS |
-| Rust | 100% | 50.8% | tokio (52-file) | experimental | P PASS, R FAIL |
-| PHP | ~100% | 85.1% | Laravel (50-pair) | experimental | P PASS, R FAIL |
+| Rust | 100% | 50.8% / 14.3% | tokio (52-file) / clap (91-file) | experimental | P PASS, R FAIL (both hard-case) |
+| PHP | ~100% | 85.1% (pre-#193/#194) | Laravel (50-pair) | experimental | P PASS, R FAIL (re-dogfood pending) |
 
 | Priority | Task | Type | Expected Impact |
 |----------|------|------|-----------------|
-| P1 | PHP recall push (R=85.1% → 90%) + re-audit | observe recall | ship criteria 達成まで残り ~5pp |
+| P1 | PHP re-dogfood (post #193/#194) | observe recall | Fixtures/Stubs helper + PSR-4 + directory-aware fan-out filter の効果測定 |
 | P2 | PHP Str.php FP resolution | observe precision | PHP P 96.0% → >=98% (fan-out name-match #173 で一部解消済み) |
 | P2 | Rust crate root barrel re-export resolution | observe recall | clap/tokio の dominant FN cause。`use clap::Arg` → barrel chain を追跡できれば R が大幅改善 |
 
@@ -36,7 +36,7 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 
 **Decision**: tokio は「最悪ケース baseline」。ship 判定は normal-case library で行う。tokio R は参考値として記録するが、ship criteria の分母に含めない。
 
-**PHP 戦略**: R=85.1% は target 90% に近い。Str.php FP (P=96.0%) は fan-out name-match (#173) で改善中。次は recall push + re-audit。
+**PHP 戦略 (updated 2026-03-25)**: #193 (Fixtures/Stubs helper detection + composer.json PSR-4) と #194 (directory-aware fan-out filter) を実装済み。次は re-dogfood で効果測定。R=85.1% からの改善幅を確認し、ship criteria (R>=90%) 達成を判定する。
 
 **新言語 (Go) は deferred**: CONSTITUTION が「4 languages」と定義。observe の 4 言語 stabilization が優先。Go は observe multi-language の価値が証明された後に検討。
 
@@ -54,6 +54,25 @@ Goal: Rust/PHP observe を stable (ship criteria PASS) にする。tokio は har
 | P3 | #113/#114/#115 Refactoring (cached_query, dedup, trait) | Internal cleanup |
 
 ## Completed Recently
+
+### #192-#194: PHP recall push + directory-aware fan-out + clap GT (2026-03-25)
+
+Goal: PHP observe recall 改善 + fan-out filter の name-match exemption 強化 + clap GT 作成。
+
+| Issue | Task | Status |
+|-------|------|--------|
+| #192 | clap Ground Truth (91-file GT, P=100%, R=14.3%) | DONE. clap は hard-case (crate root barrel) |
+| #193 | PHP Fixtures/Stubs helper detection + composer.json PSR-4 resolution | DONE. recall push 実装完了 |
+| #194 | Directory-aware fan-out filter (bidirectional name-match + directory segment match) | DONE. PHP/Rust recall 改善 |
+
+**Key insight**: fan-out filter の name-match が forward-only (test_stem.contains(prod_class)) だったため、L2 import tracing で正しくマッピングされた pair が除去されていた。bidirectional match + directory segment match で exemption を拡大。clap GT により Rust observe の ship 判定は normal-case library が見つかるまで保留が確定。
+
+### #188-#189: Rust observe cross-crate + L1 subdir stem matching (2026-03-25)
+
+| Issue | Task | Status |
+|-------|------|--------|
+| #188 | Cross-crate import resolution for Rust integration tests | DONE |
+| #189 | L1 cross-directory subdir stem matching | DONE |
 
 ### #183-#185: Rust observe precision + recall improvement (2026-03-25)
 
@@ -274,5 +293,6 @@ Route extraction (NestJS, FastAPI, Next.js, Django). TS re-dogfood (P=100%, R=91
 | -- | Fan-out filter (#129), final re-audit (#163): Rust P=100%, PHP P=96.0% | v0.4.4 |
 | -- | Rust recall: #179 single-seg fix (R 38%→63%), #181 cfg macro fallback (R 63%→71%) | v0.4.4 |
 | -- | Stratified GT re-audit (53-file), reverse fan-out (#183), GT update (#184), L1.5 matching (#185) | v0.4.5-dev |
+| -- | Cross-crate import (#188), L1 subdir stem (#189), clap GT (#192), PHP recall push (#193), directory-aware fan-out (#194) | v0.4.5-dev |
 
 Detail for completed phases is archived in git history. Key decisions are preserved in "Key Design Decisions" above.

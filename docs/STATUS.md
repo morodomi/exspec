@@ -2,9 +2,9 @@
 
 ## Current Phase
 
-v0.4.5-dev. Rust P=100%, R=50.8% (post-#185 L1.5 matching). PHP precision FAIL (P=96.0%).
+v0.4.5-dev. Rust P=100%, R=50.8% (tokio hard-case). PHP P~100%, R=85.1% (recall push + directory-aware fan-out implemented, re-dogfood pending).
 
-observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (52-file GT) (experimental, P PASS R FAIL. reverse fan-out filter + L1.5 underscore-path matching). PHP: P~100%, R=85.1% (experimental, P PASS R FAIL. fan-out+name-match filter). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
+observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). Rust: **P=100%**, R=50.8% (tokio 52-file GT) / R=14.3% (clap 91-file GT) (experimental, P PASS R FAIL. both hard-case: crate root barrel FN). PHP: P~100%, R=85.1% (experimental, P PASS R FAIL. #193 Fixtures/Stubs helper + PSR-4, #194 directory-aware fan-out filter implemented, re-dogfood pending). Lint: 17 active rules, 4 languages, same-file helper tracing enabled. Default output: ai-prompt.
 
 ## Progress
 
@@ -49,6 +49,10 @@ observe TypeScript: P=100%, R=91% (stable). Python: P=98.2%, R=96.8% (stable). R
 | GT update - secondary targets + io_driver scope exclusion | **DONE** |
 | #185 - L1.5 underscore-to-path stem matching | **DONE** |
 | clap GT - Rust observe multi-library dogfooding (clap) | **DONE** |
+| #188 - Cross-crate import resolution for Rust integration tests | **DONE** |
+| #189 - L1 cross-directory subdir stem matching for Rust observe | **DONE** |
+| #193 - PHP observe Fixtures/Stubs helper detection + composer.json PSR-4 | **DONE** |
+| #194 - Directory-aware fan-out filter for recall improvement | **DONE** |
 
 ### clap GT: Rust Observe P=100%, R=14.3% (2026-03-25)
 
@@ -197,7 +201,7 @@ Root mode resolves most B2 FN but introduces FP from peripheral imports not yet 
 
 | Metric | Current | Target |
 |--------|---------|--------|
-| Tests | 1187 passing | -- |
+| Tests | 1233 passing | -- |
 | Coverage | N/A | 90%+ (min 80%) |
 | Clippy errors | 0 | 0 |
 
