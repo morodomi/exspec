@@ -2826,7 +2826,7 @@ fn collect_router_prefixes(
 ) -> HashMap<String, String> {
     let mut prefixes = HashMap::new();
 
-    // Walk the tree to find: assignment where right side is APIRouter(prefix="...")
+    // Walk the tree to find: assignment where right side is APIRouter(prefix="...") or Blueprint('name', __name__, url_prefix='...')
     let root = tree.root_node();
     let mut stack = vec![root];
 
@@ -2839,15 +2839,18 @@ fn collect_router_prefixes(
                 if left_node.kind() == "identifier" && right_node.kind() == "call" {
                     let var_name = left_node.utf8_text(source_bytes).unwrap_or("").to_string();
 
-                    // Check if the call is APIRouter(...)
+                    // Check if the call is APIRouter(...) or Blueprint(...)
                     let fn_node = right_node.child_by_field_name("function");
-                    let is_api_router = fn_node
+                    let call_name = fn_node
                         .and_then(|f| f.utf8_text(source_bytes).ok())
-                        .map(|name| name == "APIRouter")
-                        .unwrap_or(false);
+                        .unwrap_or("");
+                    let is_api_router = call_name == "APIRouter";
+                    let is_blueprint = call_name == "Blueprint";
 
-                    if is_api_router {
-                        // Look for prefix keyword argument
+                    if is_api_router || is_blueprint {
+                        // For APIRouter, look for `prefix` keyword argument.
+                        // For Blueprint, look for `url_prefix` keyword argument.
+                        let prefix_kw = if is_blueprint { "url_prefix" } else { "prefix" };
                         let args_node = right_node.child_by_field_name("arguments");
                         if let Some(args) = args_node {
                             let mut args_cursor = args.walk();
@@ -2857,7 +2860,7 @@ fn collect_router_prefixes(
                                         .child_by_field_name("name")
                                         .and_then(|n| n.utf8_text(source_bytes).ok())
                                         .unwrap_or("");
-                                    if kw_name == "prefix" {
+                                    if kw_name == prefix_kw {
                                         if let Some(val) = arg.child_by_field_name("value") {
                                             if val.kind() == "string" {
                                                 let raw = val.utf8_text(source_bytes).unwrap_or("");
@@ -2869,7 +2872,7 @@ fn collect_router_prefixes(
                                 }
                             }
                         }
-                        // If no prefix found, insert empty string (APIRouter() without prefix)
+                        // If no prefix found, insert empty string (APIRouter()/Blueprint() without prefix)
                         prefixes.entry(var_name).or_default();
                     }
                 }
@@ -2911,6 +2914,49 @@ fn strip_string_quotes(raw: &str) -> String {
     raw.to_string()
 }
 
+/// Extract HTTP methods from a Flask `methods` keyword argument in a decorator call.
+///
+/// Given the `argument_list` node of a decorator call like `@bp.route('/path', methods=['POST'])`,
+/// looks for a `keyword_argument` with name `"methods"` and parses its list value.
+/// Returns a vec of uppercase method strings (e.g., `["POST"]`).
+/// Returns an empty vec if `methods` keyword is not found.
+fn extract_methods_kwarg<'a>(args_node: tree_sitter::Node<'a>, source_bytes: &[u8]) -> Vec<String> {
+    let mut cursor = args_node.walk();
+    for arg in args_node.named_children(&mut cursor) {
+        if arg.kind() != "keyword_argument" {
+            continue;
+        }
+        let kw_name = arg
+            .child_by_field_name("name")
+            .and_then(|n| n.utf8_text(source_bytes).ok())
+            .unwrap_or("");
+        if kw_name != "methods" {
+            continue;
+        }
+        // Found `methods=...`; the value should be a list like `['POST', 'GET']`
+        let val = match arg.child_by_field_name("value") {
+            Some(v) => v,
+            None => return vec![],
+        };
+        if val.kind() != "list" {
+            return vec![];
+        }
+        let mut methods = Vec::new();
+        let mut list_cursor = val.walk();
+        for item in val.named_children(&mut list_cursor) {
+            if item.kind() == "string" {
+                let raw = item.utf8_text(source_bytes).unwrap_or("");
+                let method = strip_string_quotes(raw).to_uppercase();
+                if !method.is_empty() {
+                    methods.push(method);
+                }
+            }
+        }
+        return methods;
+    }
+    vec![]
+}
+
 /// Extract FastAPI routes from Python source code.
 pub fn extract_routes(source: &str, file_path: &str) -> Vec<Route> {
     if source.is_empty() {
@@ -2946,6 +2992,7 @@ pub fn extract_routes(source: &str, file_path: &str) -> Vec<Route> {
         let mut method: Option<String> = None;
         let mut path_raw: Option<String> = None;
         let mut path_is_string = false;
+        let mut path_node: Option<tree_sitter::Node> = None;
         let mut handler: Option<String> = None;
 
         for cap in m.captures {
@@ -2958,6 +3005,7 @@ pub fn extract_routes(source: &str, file_path: &str) -> Vec<Route> {
                 // Determine if it's a string literal or identifier
                 path_is_string = cap.node.kind() == "string";
                 path_raw = Some(text);
+                path_node = Some(cap.node);
             } else if handler_idx == Some(cap.index) {
                 handler = Some(text);
             }
@@ -2968,7 +3016,52 @@ pub fn extract_routes(source: &str, file_path: &str) -> Vec<Route> {
             _ => continue,
         };
 
-        // Filter: method must be a known HTTP method
+        // Flask @bp.route('/path', methods=[...]) handling
+        if method == "route" {
+            // Resolve path
+            let sub_path = match path_raw {
+                Some(ref raw) if path_is_string => strip_string_quotes(raw),
+                Some(_) => "<dynamic>".to_string(),
+                None => "<dynamic>".to_string(),
+            };
+
+            // Resolve prefix from router variable (Blueprint url_prefix)
+            let prefix = router_prefixes.get(&obj).map(|s| s.as_str()).unwrap_or("");
+            let full_path = if prefix.is_empty() {
+                sub_path
+            } else {
+                format!("{prefix}{sub_path}")
+            };
+
+            // Extract `methods` keyword argument from the decorator call's argument_list.
+            // path_node.parent() is the argument_list node.
+            let http_methods: Vec<String> =
+                if let Some(arg_list) = path_node.and_then(|n| n.parent()) {
+                    let methods_vec = extract_methods_kwarg(arg_list, source_bytes);
+                    if methods_vec.is_empty() {
+                        vec!["GET".to_string()]
+                    } else {
+                        methods_vec
+                    }
+                } else {
+                    vec!["GET".to_string()]
+                };
+
+            for http_method in http_methods {
+                let key = (http_method.clone(), full_path.clone(), handler.clone());
+                if seen.insert(key) {
+                    routes.push(Route {
+                        http_method,
+                        path: full_path.clone(),
+                        handler_name: handler.clone(),
+                        file: file_path.to_string(),
+                    });
+                }
+            }
+            continue;
+        }
+
+        // Filter: method must be a known HTTP method (FastAPI)
         if !HTTP_METHODS.contains(&method.as_str()) {
             continue;
         }
@@ -3267,6 +3360,106 @@ def root():
         assert_eq!(routes[0].http_method, "GET");
         assert_eq!(routes[0].path, "/");
         assert_eq!(routes[0].handler_name, "root");
+    }
+
+    // FL-RT-01: @bp.route('/verify', methods=['POST'])
+    #[test]
+    fn fl_rt_01_blueprint_route_with_post_method() {
+        // Given: Flask Blueprint with @bp.route('/verify', methods=['POST'])
+        let source = r#"
+from flask import Blueprint
+
+bp = Blueprint('auth', __name__)
+
+@bp.route('/verify', methods=['POST'])
+def verify_func():
+    return {}
+"#;
+
+        // When: extract_routes(source, "auth.py")
+        let routes = extract_routes(source, "auth.py");
+
+        // Then: Route{ POST, /verify, verify_func }
+        assert_eq!(routes.len(), 1, "expected 1 route, got {:?}", routes);
+        assert_eq!(routes[0].http_method, "POST");
+        assert_eq!(routes[0].path, "/verify");
+        assert_eq!(routes[0].handler_name, "verify_func");
+    }
+
+    // FL-RT-02: @bp.route('/health') with no methods → defaults to GET
+    #[test]
+    fn fl_rt_02_blueprint_route_no_methods_defaults_to_get() {
+        // Given: Flask Blueprint with @bp.route('/health') (no methods arg)
+        let source = r#"
+from flask import Blueprint
+
+bp = Blueprint('health', __name__)
+
+@bp.route('/health')
+def health_func():
+    return {}
+"#;
+
+        // When: extract_routes(source, "health.py")
+        let routes = extract_routes(source, "health.py");
+
+        // Then: Route{ GET, /health, health_func }
+        assert_eq!(routes.len(), 1, "expected 1 route, got {:?}", routes);
+        assert_eq!(routes[0].http_method, "GET");
+        assert_eq!(routes[0].path, "/health");
+        assert_eq!(routes[0].handler_name, "health_func");
+    }
+
+    // FL-RT-03: Blueprint with url_prefix + @bp.route → prefix applied
+    #[test]
+    fn fl_rt_03_blueprint_url_prefix_applied() {
+        // Given: Blueprint('auth', __name__, url_prefix='/api/auth') + @bp.route('/verify')
+        let source = r#"
+from flask import Blueprint
+
+bp = Blueprint('auth', __name__, url_prefix='/api/auth')
+
+@bp.route('/verify')
+def verify_func():
+    return {}
+"#;
+
+        // When: extract_routes(source, "auth.py")
+        let routes = extract_routes(source, "auth.py");
+
+        // Then: Route{ GET, /api/auth/verify, verify_func }
+        assert_eq!(routes.len(), 1, "expected 1 route, got {:?}", routes);
+        assert_eq!(routes[0].http_method, "GET");
+        assert_eq!(routes[0].path, "/api/auth/verify");
+        assert_eq!(routes[0].handler_name, "verify_func");
+    }
+
+    // FL-RT-04: @bp.route('/data', methods=['GET', 'POST']) → 2 routes
+    #[test]
+    fn fl_rt_04_blueprint_route_multiple_methods() {
+        // Given: @bp.route('/data', methods=['GET', 'POST'])
+        let source = r#"
+from flask import Blueprint
+
+bp = Blueprint('data', __name__)
+
+@bp.route('/data', methods=['GET', 'POST'])
+def data_func():
+    return {}
+"#;
+
+        // When: extract_routes(source, "data.py")
+        let routes = extract_routes(source, "data.py");
+
+        // Then: 2 routes (GET /data and POST /data)
+        assert_eq!(routes.len(), 2, "expected 2 routes, got {:?}", routes);
+        let methods: Vec<&str> = routes.iter().map(|r| r.http_method.as_str()).collect();
+        assert!(methods.contains(&"GET"), "missing GET route");
+        assert!(methods.contains(&"POST"), "missing POST route");
+        for r in &routes {
+            assert_eq!(r.path, "/data");
+            assert_eq!(r.handler_name, "data_func");
+        }
     }
 }
 
