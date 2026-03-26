@@ -167,6 +167,13 @@ pub fn detect_inline_tests(source: &str) -> bool {
         }
 
         if is_cfg && is_test {
+            // Guard: skip if the full attribute contains `not(test)` (negated cfg).
+            if let Some(ref attr) = attr_node {
+                let attr_text = attr.utf8_text(source_bytes).unwrap_or("");
+                if attr_text.contains("not(test)") || attr_text.contains("not( test") {
+                    continue;
+                }
+            }
             // Verify that the next sibling (skipping other attribute_items) is a mod_item
             if let Some(attr) = attr_node {
                 let mut sibling = attr.next_sibling();
@@ -1889,6 +1896,49 @@ mod production_only {
         // When: detect_inline_tests is called
         // Then: returns false
         assert!(!detect_inline_tests(source));
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L0-04: #[cfg(all(test, not(loom)))] mod test {} -> true (compound cfg)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l0_04_cfg_all_test() {
+        let source = r#"
+pub(crate) fn do_work() {}
+
+#[cfg(all(test, not(loom)))]
+pub(crate) mod test {
+    use super::*;
+
+    #[test]
+    fn test_do_work() {
+        do_work();
+    }
+}
+"#;
+        assert!(detect_inline_tests(source));
+    }
+
+    // -----------------------------------------------------------------------
+    // RS-L0-05: #[cfg(any(test, fuzzing))] mod tests {} -> true (compound cfg)
+    // -----------------------------------------------------------------------
+    #[test]
+    fn rs_l0_05_cfg_any_test() {
+        let source = r#"
+pub struct LinkedList;
+
+#[cfg(any(test, fuzzing))]
+#[cfg(not(loom))]
+pub(crate) mod tests {
+    use super::*;
+
+    #[test]
+    fn const_new() {
+        let _ = LinkedList;
+    }
+}
+"#;
+        assert!(detect_inline_tests(source));
     }
 
     // -----------------------------------------------------------------------
