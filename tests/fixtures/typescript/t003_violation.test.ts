@@ -69,6 +69,8 @@ test('giant test function', () => {
   const step68 = validateReport(step67);
   const step69 = archiveOrder(step68);
   const step70 = cleanup(step69);
-  const final_result = summarize(step70);
+  const step71 = setupDatabase();
+  const step72 = createUser(step71);
+  const final_result = summarize(step72);
   expect(final_result).toBeDefined();
 });

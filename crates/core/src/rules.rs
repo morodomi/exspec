@@ -84,6 +84,7 @@ pub struct Config {
     pub mock_max: usize,
     pub mock_class_max: usize,
     pub test_max_lines: usize,
+    pub test_max_lines_is_explicit: bool,
     pub parameterized_min_ratio: f64,
     pub fixture_max: usize,
     pub min_assertions_for_t105: usize,
@@ -103,6 +104,7 @@ impl Default for Config {
             mock_max: 5,
             mock_class_max: 3,
             test_max_lines: 50,
+            test_max_lines_is_explicit: false,
             parameterized_min_ratio: 0.1,
             fixture_max: 5,
             min_assertions_for_t105: 5,
@@ -119,6 +121,18 @@ impl Default for Config {
 }
 
 use crate::extractor::TestFunction;
+
+pub fn default_test_max_lines(file: &str) -> usize {
+    let ext = std::path::Path::new(file)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    match ext {
+        "php" | "rs" => 100,
+        "ts" | "tsx" | "jsx" => 75,
+        _ => 50,
+    }
+}
 
 pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
@@ -165,9 +179,14 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
         }
 
         // T003: giant-test
+        let t003_threshold = if config.test_max_lines_is_explicit {
+            config.test_max_lines
+        } else {
+            default_test_max_lines(&func.file)
+        };
         if !is_disabled(config, "T003")
             && !is_suppressed(analysis, "T003")
-            && analysis.line_count > config.test_max_lines
+            && analysis.line_count > t003_threshold
         {
             diagnostics.push(Diagnostic {
                 rule: RuleId::new("T003"),
@@ -176,7 +195,7 @@ pub fn evaluate_rules(functions: &[TestFunction], config: &Config) -> Vec<Diagno
                 line: Some(func.line),
                 message: format!(
                     "giant-test: {} lines, threshold: {}",
-                    analysis.line_count, config.test_max_lines,
+                    analysis.line_count, t003_threshold,
                 ),
                 details: None,
             });
@@ -552,6 +571,16 @@ mod tests {
         }
     }
 
+    fn make_func_with_file(name: &str, file: &str, analysis: TestAnalysis) -> TestFunction {
+        TestFunction {
+            name: name.to_string(),
+            file: file.to_string(),
+            line: 1,
+            end_line: 10,
+            analysis,
+        }
+    }
+
     // --- Severity tests (from Phase 1) ---
 
     #[test]
@@ -858,6 +887,102 @@ mod tests {
         )];
         let diags = evaluate_rules(&funcs, &Config::default());
         assert!(diags.is_empty());
+    }
+
+    // --- T003: language-specific default thresholds ---
+
+    #[test]
+    fn tc01_default_test_max_lines_php_returns_100() {
+        // Given: .php file with test function
+        // When: default_test_max_lines called
+        // Then: returns 100
+        assert_eq!(default_test_max_lines("tests/ExampleTest.php"), 100);
+    }
+
+    #[test]
+    fn tc02_default_test_max_lines_rs_returns_100() {
+        // Given: .rs file with test function
+        // When: default_test_max_lines called
+        // Then: returns 100
+        assert_eq!(default_test_max_lines("crates/core/src/rules.rs"), 100);
+    }
+
+    #[test]
+    fn tc03_default_test_max_lines_ts_returns_75() {
+        // Given: .ts file with test function
+        // When: default_test_max_lines called
+        // Then: returns 75
+        assert_eq!(default_test_max_lines("src/auth.test.ts"), 75);
+    }
+
+    #[test]
+    fn tc03_default_test_max_lines_tsx_returns_75() {
+        // Given: .tsx file with test function
+        // When: default_test_max_lines called
+        // Then: returns 75
+        assert_eq!(default_test_max_lines("src/components/Button.test.tsx"), 75);
+    }
+
+    #[test]
+    fn tc04_default_test_max_lines_py_returns_50() {
+        // Given: .py file with test function
+        // When: default_test_max_lines called
+        // Then: returns 50
+        assert_eq!(default_test_max_lines("tests/test_auth.py"), 50);
+    }
+
+    #[test]
+    fn tc05_explicit_config_overrides_language_default_for_php() {
+        // Given: .exspec.toml with explicit test_max_lines = 60, test_max_lines_is_explicit = true
+        // When: T003 evaluated for PHP file with 80-line test
+        // Then: WARN triggered (80 > 60 = explicit config)
+        let config = Config {
+            test_max_lines: 60,
+            test_max_lines_is_explicit: true,
+            ..Config::default()
+        };
+        let funcs = vec![make_func_with_file(
+            "test_feature_create_user",
+            "tests/Feature/UserTest.php",
+            TestAnalysis {
+                assertion_count: 1,
+                line_count: 80,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &config);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].rule, RuleId::new("T003"));
+        assert_eq!(diags[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn tc06_no_explicit_config_php_80_lines_no_warn() {
+        // Given: no explicit test_max_lines in config (test_max_lines_is_explicit = false)
+        // When: T003 evaluated for PHP file with 80-line test
+        // Then: no WARN (80 < 100 = PHP default)
+        let config = Config {
+            test_max_lines_is_explicit: false,
+            ..Config::default()
+        };
+        let funcs = vec![make_func_with_file(
+            "test_feature_create_user",
+            "tests/Feature/UserTest.php",
+            TestAnalysis {
+                assertion_count: 1,
+                line_count: 80,
+                ..Default::default()
+            },
+        )];
+        let diags = evaluate_rules(&funcs, &config);
+        let t003_diags: Vec<_> = diags
+            .iter()
+            .filter(|d| d.rule == RuleId::new("T003"))
+            .collect();
+        assert!(
+            t003_diags.is_empty(),
+            "expected no T003 WARN for 80-line PHP test with default config"
+        );
     }
 
     // --- Config disabled ---

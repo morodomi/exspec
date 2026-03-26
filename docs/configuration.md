@@ -78,7 +78,7 @@ This is orthogonal to `--min-severity` / `[output] min_severity`: severity overr
 |-----|------|---------|-------------|
 | `mock_max` | int | 5 | T002: max mocks per test |
 | `mock_class_max` | int | 3 | T002: max distinct mock classes |
-| `test_max_lines` | int | 50 | T003: max lines per test |
+| `test_max_lines` | int | language-specific | T003: max lines per test (Python: 50, TS: 75, PHP: 100, Rust: 100) |
 | `parameterized_min_ratio` | float | 0.1 | T004: min ratio of parameterized tests |
 
 ### `[paths]`
