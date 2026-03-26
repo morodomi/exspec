@@ -8,7 +8,8 @@ use exspec_core::extractor::{FileAnalysis, LanguageExtractor};
 use exspec_core::hints::compute_hints;
 use exspec_core::metrics::compute_metrics;
 use exspec_core::observe_report::{
-    ObserveFileEntry, ObserveReport, ObserveRouteEntry, ObserveSummary,
+    ObserveFileEntry, ObserveReport, ObserveRouteEntry, ObserveSummary, ROUTE_STATUS_COVERED,
+    ROUTE_STATUS_GAP, ROUTE_STATUS_UNMAPPABLE,
 };
 use exspec_core::output::{
     compute_exit_code, filter_by_severity, format_ai_prompt, format_json, format_sarif,
@@ -323,6 +324,14 @@ fn build_observe_report(
     }
 
     let routes_covered = routes.iter().filter(|r| !r.test_files.is_empty()).count();
+    let routes_gap = routes
+        .iter()
+        .filter(|r| r.status == ROUTE_STATUS_GAP)
+        .count();
+    let routes_unmappable = routes
+        .iter()
+        .filter(|r| r.status == ROUTE_STATUS_UNMAPPABLE)
+        .count();
     let mapped_count = file_entries.len();
 
     ObserveReport {
@@ -333,6 +342,8 @@ fn build_observe_report(
             unmapped_files: unmapped.len(),
             routes_total: routes.len(),
             routes_covered,
+            routes_gap,
+            routes_unmappable,
         },
         file_mappings: file_entries,
         routes,
@@ -422,6 +433,17 @@ fn run_observe_common(
                     }
                 }
             }
+            // Set status and gap_reasons based on coverage
+            if !entry.test_files.is_empty() {
+                entry.status = ROUTE_STATUS_COVERED.to_string();
+                entry.gap_reasons = vec![];
+            } else if !entry.handler.is_empty() {
+                entry.status = ROUTE_STATUS_GAP.to_string();
+                entry.gap_reasons = vec!["no_test_mapping".to_string()];
+            } else {
+                entry.status = ROUTE_STATUS_UNMAPPABLE.to_string();
+                entry.gap_reasons = vec![];
+            }
             entry
         })
         .collect();
@@ -434,6 +456,7 @@ fn run_observe_common(
     );
     let output = match format {
         "json" => report.format_json(),
+        "ai-prompt" => report.format_ai_prompt(),
         _ => report.format_terminal(),
     };
     if !output.is_empty() {
@@ -442,7 +465,7 @@ fn run_observe_common(
 }
 
 fn run_observe(args: ObserveArgs) {
-    let observe_formats = ["terminal", "json"];
+    let observe_formats = ["terminal", "json", "ai-prompt"];
     if !observe_formats.contains(&args.format.as_str()) {
         eprintln!(
             "error: unsupported format for observe: {}. Supported: {}",
@@ -483,6 +506,8 @@ fn run_observe(args: ObserveArgs) {
                             handler: format!("{}.{}", r.class_name, r.handler_name),
                             file: r.file,
                             test_files: Vec::new(),
+                            status: String::new(),
+                            gap_reasons: vec![],
                         }));
                         // Next.js App Router routes (file-based)
                         let nextjs_routes = ts_ext.extract_nextjs_routes(&source, prod_file);
@@ -496,6 +521,8 @@ fn run_observe(args: ObserveArgs) {
                             },
                             file: r.file,
                             test_files: Vec::new(),
+                            status: String::new(),
+                            gap_reasons: vec![],
                         }));
                     }
                     all_routes
@@ -532,6 +559,8 @@ fn run_observe(args: ObserveArgs) {
                             handler: r.handler_name,
                             file: r.file,
                             test_files: Vec::new(),
+                            status: String::new(),
+                            gap_reasons: vec![],
                         }));
                     }
                     all_routes
@@ -601,6 +630,8 @@ fn run_observe(args: ObserveArgs) {
                                             },
                                             file: r.file,
                                             test_files: Vec::new(),
+                                            status: String::new(),
+                                            gap_reasons: vec![],
                                         }
                                     }));
                                 }
@@ -2249,6 +2280,8 @@ def test_read_users():
                 handler: r.handler_name,
                 file: r.file,
                 test_files: vec![test_path.clone()],
+                status: String::new(),
+                gap_reasons: vec![],
             })
             .collect();
 
@@ -2332,6 +2365,8 @@ test('GET returns array', async () => {
             handler: format!("{}.{}", r.class_name, r.handler_name),
             file: r.file,
             test_files: Vec::new(),
+            status: String::new(),
+            gap_reasons: vec![],
         }));
 
         let nextjs_routes = ts_ext.extract_nextjs_routes(&route_source, &route_path);
@@ -2345,6 +2380,8 @@ test('GET returns array', async () => {
             },
             file: r.file,
             test_files: vec![test_path.clone()],
+            status: String::new(),
+            gap_reasons: vec![],
         }));
 
         // Then: dispatch produces 2 routes from Next.js (NestJS yields 0 for this file)
