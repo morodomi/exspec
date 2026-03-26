@@ -388,18 +388,39 @@ fn run_observe_common(
 
     // Build route entries with coverage info
     let mut prod_to_tests: HashMap<String, Vec<String>> = HashMap::new();
+    let mut class_to_tests: HashMap<String, Vec<String>> = HashMap::new();
     if !route_entries.is_empty() {
         for m in &file_mappings {
             if !m.test_files.is_empty() {
                 prod_to_tests.insert(m.production_file.clone(), m.test_files.clone());
+                // Class-based lookup: .../FooController.php → "FooController"
+                if let Some(stem) = Path::new(&m.production_file)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    class_to_tests
+                        .entry(stem.to_string())
+                        .or_default()
+                        .extend(m.test_files.clone());
+                }
             }
         }
     }
     let route_entries: Vec<ObserveRouteEntry> = route_entries
         .into_iter()
         .map(|mut entry| {
+            // File-based match (NestJS/Next.js: route defined in controller file)
             if let Some(tf) = prod_to_tests.get(&entry.file) {
                 entry.test_files = tf.clone();
+            }
+            // Class-based match (Laravel: handler = "TrialController.index")
+            if entry.test_files.is_empty() && !entry.handler.is_empty() {
+                let class_name = entry.handler.split('.').next().unwrap_or("");
+                if !class_name.is_empty() {
+                    if let Some(tf) = class_to_tests.get(class_name) {
+                        entry.test_files = tf.clone();
+                    }
+                }
             }
             entry
         })
