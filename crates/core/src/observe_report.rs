@@ -1,5 +1,10 @@
 use serde::Serialize;
 
+/// Status constants for route coverage.
+pub const ROUTE_STATUS_COVERED: &str = "covered";
+pub const ROUTE_STATUS_GAP: &str = "gap";
+pub const ROUTE_STATUS_UNMAPPABLE: &str = "unmappable";
+
 /// A route with test coverage information.
 #[derive(Debug, Clone, Serialize)]
 pub struct ObserveRouteEntry {
@@ -8,6 +13,8 @@ pub struct ObserveRouteEntry {
     pub handler: String,
     pub file: String,
     pub test_files: Vec<String>,
+    pub status: String,           // "covered" | "gap" | "unmappable"
+    pub gap_reasons: Vec<String>, // e.g. ["no_test_mapping"]
 }
 
 /// A file mapping entry for the report.
@@ -27,6 +34,8 @@ pub struct ObserveSummary {
     pub unmapped_files: usize,
     pub routes_total: usize,
     pub routes_covered: usize,
+    pub routes_gap: usize,
+    pub routes_unmappable: usize,
 }
 
 /// Full observe report.
@@ -66,16 +75,34 @@ impl ObserveReport {
         // Route Coverage
         if self.summary.routes_total > 0 {
             out.push_str(&format!(
-                "\n## Route Coverage ({}/{})\n",
-                self.summary.routes_covered, self.summary.routes_total
+                "\n## Route Coverage: {} total, {} covered, {} gap, {} unmappable\n",
+                self.summary.routes_total,
+                self.summary.routes_covered,
+                self.summary.routes_gap,
+                self.summary.routes_unmappable,
+            ));
+            out.push_str(&format!(
+                "Routes: {} total, {} covered, {} gap, {} unmappable\n",
+                self.summary.routes_total,
+                self.summary.routes_covered,
+                self.summary.routes_gap,
+                self.summary.routes_unmappable,
             ));
             out.push_str("| Route | Handler | Test File | Status |\n");
             out.push_str("|-------|---------|-----------|--------|\n");
             for route in &self.routes {
-                let status = if route.test_files.is_empty() {
-                    "Gap"
+                let status = if route.status.is_empty() {
+                    if route.test_files.is_empty() {
+                        "Gap"
+                    } else {
+                        "Covered"
+                    }
                 } else {
-                    "Covered"
+                    match route.status.as_str() {
+                        "covered" => "Covered",
+                        "unmappable" => "Unmappable",
+                        _ => "Gap",
+                    }
                 };
                 let test_display = if route.test_files.is_empty() {
                     "\u{2014}".to_string()
@@ -141,6 +168,39 @@ impl ObserveReport {
 
         serde_json::to_string_pretty(&output).unwrap_or_else(|_| "{}".to_string())
     }
+
+    /// Format as AI-friendly prompt for test generation guidance.
+    pub fn format_ai_prompt(&self) -> String {
+        let mut out = String::new();
+
+        out.push_str("## Route Coverage Summary\n\n");
+        out.push_str(&format!("- Total routes: {}\n", self.summary.routes_total));
+        out.push_str(&format!("- Covered: {}\n", self.summary.routes_covered));
+        out.push_str(&format!("- Gap: {}\n", self.summary.routes_gap));
+        out.push_str(&format!(
+            "- Unmappable: {}\n",
+            self.summary.routes_unmappable
+        ));
+
+        let gap_routes: Vec<&ObserveRouteEntry> =
+            self.routes.iter().filter(|r| r.status == "gap").collect();
+
+        if gap_routes.is_empty() {
+            out.push_str("\nAll mappable routes have test coverage.\n");
+        } else {
+            out.push_str("\n## Route Coverage Gaps\n\n");
+            out.push_str("The following API routes have no test coverage:\n");
+            for route in &gap_routes {
+                out.push_str(&format!(
+                    "- {} {} -> {}\n",
+                    route.http_method, route.path, route.handler
+                ));
+            }
+            out.push_str("\nConsider writing tests for these endpoints.\n");
+        }
+
+        out
+    }
 }
 
 #[cfg(test)]
@@ -156,6 +216,8 @@ mod tests {
                 unmapped_files: 1,
                 routes_total: 3,
                 routes_covered: 2,
+                routes_gap: 1,
+                routes_unmappable: 0,
             },
             file_mappings: vec![
                 ObserveFileEntry {
@@ -176,6 +238,8 @@ mod tests {
                     handler: "UsersController.findAll".to_string(),
                     file: "src/users.controller.ts".to_string(),
                     test_files: vec!["src/users.controller.spec.ts".to_string()],
+                    status: "covered".to_string(),
+                    gap_reasons: vec![],
                 },
                 ObserveRouteEntry {
                     http_method: "POST".to_string(),
@@ -183,6 +247,8 @@ mod tests {
                     handler: "UsersController.create".to_string(),
                     file: "src/users.controller.ts".to_string(),
                     test_files: vec!["src/users.controller.spec.ts".to_string()],
+                    status: "covered".to_string(),
+                    gap_reasons: vec![],
                 },
                 ObserveRouteEntry {
                     http_method: "DELETE".to_string(),
@@ -190,6 +256,8 @@ mod tests {
                     handler: "UsersController.remove".to_string(),
                     file: "src/utils/helpers.ts".to_string(),
                     test_files: vec![],
+                    status: "gap".to_string(),
+                    gap_reasons: vec!["no_test_mapping".to_string()],
                 },
             ],
             unmapped_production_files: vec!["src/utils/helpers.ts".to_string()],
@@ -206,6 +274,8 @@ mod tests {
         assert_eq!(report.summary.unmapped_files, 1);
         assert_eq!(report.summary.routes_total, 3);
         assert_eq!(report.summary.routes_covered, 2);
+        assert_eq!(report.summary.routes_gap, 1);
+        assert_eq!(report.summary.routes_unmappable, 0);
     }
 
     // OB3: JSON output is valid and has required fields
@@ -224,6 +294,14 @@ mod tests {
 
         assert_eq!(parsed["summary"]["production_files"], 3);
         assert_eq!(parsed["summary"]["routes_covered"], 2);
+        assert_eq!(parsed["summary"]["routes_gap"], 1);
+        assert_eq!(parsed["summary"]["routes_unmappable"], 0);
+
+        // Route entries have status and gap_reasons
+        let routes = parsed["routes"].as_array().unwrap();
+        assert_eq!(routes[0]["status"], "covered");
+        assert_eq!(routes[2]["status"], "gap");
+        assert_eq!(routes[2]["gap_reasons"][0], "no_test_mapping");
     }
 
     // OB4: terminal output contains expected sections
@@ -234,8 +312,18 @@ mod tests {
 
         assert!(output.contains("## Summary"), "missing Summary section");
         assert!(
-            output.contains("## Route Coverage"),
+            output.contains("## Route Coverage:"),
             "missing Route Coverage section"
+        );
+        assert!(output.contains("3 total"), "missing routes_total in header");
+        assert!(
+            output.contains("2 covered"),
+            "missing routes_covered in header"
+        );
+        assert!(output.contains("1 gap"), "missing routes_gap in header");
+        assert!(
+            output.contains("0 unmappable"),
+            "missing routes_unmappable in header"
         );
         assert!(
             output.contains("## File Mappings"),
@@ -273,5 +361,132 @@ mod tests {
         let report = sample_report();
         let output = report.format_terminal();
         assert!(output.contains("- src/utils/helpers.ts"));
+    }
+
+    // TC-01: Given route with test_files, When report built, Then status="covered" and gap_reasons=[]
+    #[test]
+    fn tc01_covered_route_has_status_covered_and_empty_gap_reasons() {
+        // Given: a route entry with test_files populated
+        let route = ObserveRouteEntry {
+            http_method: "GET".to_string(),
+            path: "/api/items".to_string(),
+            handler: "ItemsController.index".to_string(),
+            file: "src/items.controller.ts".to_string(),
+            test_files: vec!["src/items.controller.spec.ts".to_string()],
+            status: "covered".to_string(),
+            gap_reasons: vec![],
+        };
+
+        // When / Then
+        assert_eq!(route.status, ROUTE_STATUS_COVERED);
+        assert!(route.gap_reasons.is_empty());
+    }
+
+    // TC-02: Given route with handler but no test_files, When report built, Then status="gap" and gap_reasons=["no_test_mapping"]
+    #[test]
+    fn tc02_gap_route_has_status_gap_and_no_test_mapping_reason() {
+        // Given: a route entry with a handler but no test_files
+        let route = ObserveRouteEntry {
+            http_method: "POST".to_string(),
+            path: "/api/items".to_string(),
+            handler: "ItemsController.store".to_string(),
+            file: "src/items.controller.ts".to_string(),
+            test_files: vec![],
+            status: "gap".to_string(),
+            gap_reasons: vec!["no_test_mapping".to_string()],
+        };
+
+        // When / Then
+        assert_eq!(route.status, ROUTE_STATUS_GAP);
+        assert_eq!(route.gap_reasons, vec!["no_test_mapping"]);
+    }
+
+    // TC-03: Given route with empty handler, When report built, Then status="unmappable" and gap_reasons=[]
+    #[test]
+    fn tc03_unmappable_route_has_status_unmappable_and_empty_gap_reasons() {
+        // Given: a route entry with an empty handler (e.g. closure)
+        let route = ObserveRouteEntry {
+            http_method: "GET".to_string(),
+            path: "/health".to_string(),
+            handler: "".to_string(),
+            file: "src/app.ts".to_string(),
+            test_files: vec![],
+            status: "unmappable".to_string(),
+            gap_reasons: vec![],
+        };
+
+        // When / Then
+        assert_eq!(route.status, ROUTE_STATUS_UNMAPPABLE);
+        assert!(route.gap_reasons.is_empty());
+    }
+
+    // TC-04: Terminal output contains "Routes: X total, Y covered, Z gap, W unmappable" summary line
+    #[test]
+    fn tc04_terminal_output_contains_routes_summary_line() {
+        // Given: a report with route coverage data
+        let report = sample_report();
+
+        // When
+        let output = report.format_terminal();
+
+        // Then: output must contain a standalone summary line in this exact format
+        assert!(
+            output.contains("Routes: 3 total, 2 covered, 1 gap, 0 unmappable"),
+            "terminal output must contain 'Routes: X total, Y covered, Z gap, W unmappable' summary line, got:\n{output}"
+        );
+    }
+
+    // TC-05: JSON output contains status and gap_reasons fields for each route
+    #[test]
+    fn tc05_json_output_contains_status_and_gap_reasons_per_route() {
+        // Given
+        let report = sample_report();
+
+        // When
+        let json = report.format_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        // Then: every route entry must have status and gap_reasons
+        let routes = parsed["routes"].as_array().expect("routes is array");
+        for route in routes {
+            assert!(
+                route.get("status").is_some(),
+                "route missing 'status' field: {route}"
+            );
+            assert!(
+                route.get("gap_reasons").is_some(),
+                "route missing 'gap_reasons' field: {route}"
+            );
+        }
+
+        // Verify specific values
+        assert_eq!(routes[0]["status"], ROUTE_STATUS_COVERED);
+        assert_eq!(routes[0]["gap_reasons"].as_array().unwrap().len(), 0);
+        assert_eq!(routes[2]["status"], ROUTE_STATUS_GAP);
+        assert_eq!(routes[2]["gap_reasons"][0], "no_test_mapping");
+    }
+
+    // TC-06: AI prompt output lists gap routes with handler info
+    #[test]
+    fn tc06_ai_prompt_lists_gap_routes_with_handler_info() {
+        // Given
+        let report = sample_report();
+
+        // When
+        let output = report.format_ai_prompt();
+
+        // Then: output must list the gap route with its handler
+        assert!(
+            output.contains("DELETE /users/:id"),
+            "ai prompt must mention gap route path, got:\n{output}"
+        );
+        assert!(
+            output.contains("UsersController.remove"),
+            "ai prompt must mention gap route handler, got:\n{output}"
+        );
+        assert!(
+            output.contains("## Route Coverage Gaps"),
+            "ai prompt must have Route Coverage Gaps section, got:\n{output}"
+        );
     }
 }
