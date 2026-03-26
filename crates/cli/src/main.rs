@@ -351,6 +351,81 @@ fn build_observe_report(
     }
 }
 
+/// Convert a route path pattern to a `Regex` for URL matching.
+///
+/// `{param}` segments are replaced with `[^/]+`. All other characters are
+/// regex-escaped so that punctuation (e.g. `-`) is treated literally.
+/// Returns `None` if `path` is empty or consists only of dynamic segments
+/// (e.g. `{path}.php`).
+fn route_path_to_regex(path: &str) -> Option<regex::Regex> {
+    if path.is_empty() {
+        return None;
+    }
+    // Build the regex pattern segment by segment.
+    let mut pattern = String::from("^");
+    let mut i = 0;
+    let bytes = path.as_bytes();
+    let len = path.len();
+    while i < len {
+        if bytes[i] == b'{' {
+            // Find the closing '}'
+            if let Some(end) = path[i..].find('}') {
+                pattern.push_str("[^/]+");
+                i += end + 1;
+            } else {
+                // Malformed: treat the rest as literal
+                pattern.push_str(&regex::escape(&path[i..]));
+                break;
+            }
+        } else {
+            // Find the next '{' and escape the static segment before it
+            let next = path[i..].find('{').map(|p| i + p).unwrap_or(len);
+            pattern.push_str(&regex::escape(&path[i..next]));
+            i = next;
+        }
+    }
+    pattern.push('$');
+
+    // Reject patterns that are only anchors (path was empty after processing)
+    if pattern == "^$" {
+        return None;
+    }
+
+    regex::Regex::new(&pattern).ok()
+}
+
+/// Return `true` if any quoted string literal in `source` matches `path_regex`.
+///
+/// Scans for single- or double-quoted string tokens and tests each extracted
+/// value against the regex. No tree-sitter parsing is needed; simple scanning
+/// is sufficient for HTTP client call patterns like `'/csrf-token'`.
+fn has_url_match(source: &str, path_regex: &regex::Regex) -> bool {
+    let chars: Vec<char> = source.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        let quote = chars[i];
+        if quote == '\'' || quote == '"' {
+            // Collect characters until the matching closing quote (no escape handling needed
+            // for path literals).
+            let mut j = i + 1;
+            while j < len && chars[j] != quote {
+                j += 1;
+            }
+            if j < len {
+                let token: String = chars[i + 1..j].iter().collect();
+                if path_regex.is_match(&token) {
+                    return true;
+                }
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Common observe pipeline: discover files → read test sources → map → report → output.
 ///
 /// `lang_str` / `lang` select which files to discover.
@@ -430,6 +505,17 @@ fn run_observe_common(
                 if !class_name.is_empty() {
                     if let Some(tf) = class_to_tests.get(class_name) {
                         entry.test_files = tf.clone();
+                    }
+                }
+            }
+            // URL path-based match (closure routes + gap routes)
+            if entry.test_files.is_empty() {
+                if let Some(path_re) = route_path_to_regex(&entry.path) {
+                    for (test_file, source) in &test_sources {
+                        if has_url_match(source, &path_re) && !entry.test_files.contains(test_file)
+                        {
+                            entry.test_files.push(test_file.clone());
+                        }
                     }
                 }
             }
@@ -3205,6 +3291,314 @@ test('GET returns array', async () => {
         assert_eq!(
             extract_class_name("src/Illuminate/Database/Eloquent/Model.php"),
             "Model"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-01 to TC-04: closure route URL path matching
+    // Cycle: docs/cycles/20260326_1540_closure-route-url-path-matching.md
+    // -----------------------------------------------------------------------
+
+    // --- route_path_to_regex unit tests ---
+
+    // TC-01-unit-a: static path "/csrf-token" compiles to a regex that matches itself
+    #[test]
+    fn url_match_tc01_static_path_regex_matches_exact_path() {
+        // Given: static route path "/csrf-token"
+        // When: route_path_to_regex is called
+        // Then: the returned regex matches the string "/csrf-token"
+        let regex = route_path_to_regex("/csrf-token").expect("should compile");
+        assert!(
+            regex.is_match("/csrf-token"),
+            "regex should match '/csrf-token', pattern: {}",
+            regex.as_str()
+        );
+    }
+
+    // TC-01-unit-b: static path regex does NOT match a different path
+    #[test]
+    fn url_match_tc01_static_path_regex_does_not_match_other_path() {
+        // Given: static route path "/csrf-token"
+        // When: route_path_to_regex is called
+        // Then: the returned regex does NOT match "/about"
+        let regex = route_path_to_regex("/csrf-token").expect("should compile");
+        assert!(!regex.is_match("/about"), "regex should NOT match '/about'");
+    }
+
+    // TC-02-unit-a: dynamic path "/users/{id}" regex matches "/users/1"
+    #[test]
+    fn url_match_tc02_dynamic_path_regex_matches_concrete_segment() {
+        // Given: dynamic route path "/users/{id}" with one path parameter
+        // When: route_path_to_regex converts {id} -> [^/]+
+        // Then: the regex matches "/users/1"
+        let regex = route_path_to_regex("/users/{id}").expect("should compile");
+        assert!(
+            regex.is_match("/users/1"),
+            "regex should match '/users/1', pattern: {}",
+            regex.as_str()
+        );
+    }
+
+    // TC-02-unit-b: dynamic path regex does NOT match two-segment path (param is non-slash)
+    #[test]
+    fn url_match_tc02_dynamic_path_regex_does_not_match_extra_segment() {
+        // Given: dynamic route path "/users/{id}"
+        // When: route_path_to_regex is applied
+        // Then: the regex does NOT match "/users/1/extra" (extra segment)
+        let regex = route_path_to_regex("/users/{id}").expect("should compile");
+        assert!(
+            !regex.is_match("/users/1/extra"),
+            "regex should NOT match '/users/1/extra'"
+        );
+    }
+
+    // --- has_url_match unit tests ---
+
+    // TC-01-unit-c: PHP test source with ->get('/csrf-token') is detected
+    #[test]
+    fn url_match_tc01_has_url_match_detects_php_get_call() {
+        // Given: PHP test source containing $this->get('/csrf-token')
+        // When: has_url_match is called with the compiled regex for "/csrf-token"
+        // Then: returns true
+        let source = r#"
+class CsrfTokenTest extends TestCase {
+    public function test_csrf_token_is_returned(): void {
+        $response = $this->get('/csrf-token');
+        $response->assertStatus(200);
+    }
+}
+"#;
+        let regex = route_path_to_regex("/csrf-token").expect("should compile");
+        assert!(
+            has_url_match(source, &regex),
+            "has_url_match should return true for source containing '/csrf-token'"
+        );
+    }
+
+    // TC-02-unit-c: PHP test source with ->get('/users/1') matches dynamic route "/users/{id}"
+    #[test]
+    fn url_match_tc02_has_url_match_detects_dynamic_path_in_php_source() {
+        // Given: PHP test source with $this->get('/users/1')
+        //        And dynamic route path "/users/{id}"
+        // When: has_url_match is called
+        // Then: returns true (dynamic segment matches the literal "1")
+        let source = r#"
+class UserTest extends TestCase {
+    public function test_show_user(): void {
+        $response = $this->get('/users/1');
+        $response->assertStatus(200);
+    }
+}
+"#;
+        let regex = route_path_to_regex("/users/{id}").expect("should compile");
+        assert!(
+            has_url_match(source, &regex),
+            "has_url_match should return true for '/users/1' matching dynamic route '/users/{{id}}'"
+        );
+    }
+
+    // TC-03-unit: source with no matching URL returns false
+    #[test]
+    fn url_match_tc03_has_url_match_returns_false_when_no_path_in_source() {
+        // Given: PHP test source that does NOT contain "/about"
+        // When: has_url_match is called with regex for "/about"
+        // Then: returns false
+        let source = r#"
+class HomeTest extends TestCase {
+    public function test_home(): void {
+        $response = $this->get('/');
+        $response->assertStatus(200);
+    }
+}
+"#;
+        let regex = route_path_to_regex("/about").expect("should compile");
+        assert!(
+            !has_url_match(source, &regex),
+            "has_url_match should return false when source does not contain '/about'"
+        );
+    }
+
+    // TC-04-unit: Python test source with client.post('/api/auth/verify') is detected
+    #[test]
+    fn url_match_tc04_has_url_match_detects_python_post_call() {
+        // Given: Python test source with client.post('/api/auth/verify')
+        //        And Flask route "POST /api/auth/verify"
+        // When: has_url_match is called
+        // Then: returns true
+        let source = r#"
+def test_verify_auth(client):
+    response = client.post('/api/auth/verify', json={'token': 'abc'})
+    assert response.status_code == 200
+"#;
+        let regex = route_path_to_regex("/api/auth/verify").expect("should compile");
+        assert!(
+            has_url_match(source, &regex),
+            "has_url_match should return true for Python source containing '/api/auth/verify'"
+        );
+    }
+
+    // --- integration-style tests: ObserveRouteEntry status transitions ---
+
+    // TC-01-int: closure route GET /csrf-token becomes "covered" via URL match
+    #[test]
+    fn url_match_tc01_closure_route_becomes_covered_via_url_match() {
+        // Given: ObserveRouteEntry for "GET /csrf-token" with no test_files (unmappable)
+        //        And test source containing $this->get('/csrf-token')
+        // When: URL path matching is applied
+        // Then: entry.status == "covered"
+        let test_source = r#"
+class CsrfTokenTest extends TestCase {
+    public function test_csrf_token(): void {
+        $response = $this->get('/csrf-token');
+        $response->assertStatus(200);
+    }
+}
+"#;
+        let mut entry = ObserveRouteEntry {
+            http_method: "GET".to_string(),
+            path: "/csrf-token".to_string(),
+            handler: String::new(),
+            file: "routes/web.php".to_string(),
+            test_files: vec![],
+            status: ROUTE_STATUS_UNMAPPABLE.to_string(),
+            gap_reasons: vec![],
+        };
+
+        // Apply URL path matching: the functions don't exist yet -> RED
+        let route_regex = route_path_to_regex(&entry.path).expect("should compile regex");
+        if has_url_match(test_source, &route_regex) {
+            entry
+                .test_files
+                .push("tests/Feature/CsrfTokenTest.php".to_string());
+            entry.status = ROUTE_STATUS_COVERED.to_string();
+        }
+
+        assert_eq!(
+            entry.status, ROUTE_STATUS_COVERED,
+            "route GET /csrf-token should be 'covered' after URL match, got: {}",
+            entry.status
+        );
+        assert!(
+            !entry.test_files.is_empty(),
+            "test_files should be non-empty after URL match"
+        );
+    }
+
+    // TC-02-int: closure route GET /users/{id} becomes "covered" via dynamic URL match
+    #[test]
+    fn url_match_tc02_dynamic_closure_route_becomes_covered_via_url_match() {
+        // Given: ObserveRouteEntry for "GET /users/{id}" with no test_files (unmappable)
+        //        And test source containing $this->get('/users/1')
+        // When: URL path matching with regex conversion ({id} -> [^/]+) is applied
+        // Then: entry.status == "covered"
+        let test_source = r#"
+class UserControllerTest extends TestCase {
+    public function test_show_user(): void {
+        $this->get('/users/1')->assertStatus(200);
+    }
+}
+"#;
+        let mut entry = ObserveRouteEntry {
+            http_method: "GET".to_string(),
+            path: "/users/{id}".to_string(),
+            handler: String::new(),
+            file: "routes/api.php".to_string(),
+            test_files: vec![],
+            status: ROUTE_STATUS_UNMAPPABLE.to_string(),
+            gap_reasons: vec![],
+        };
+
+        let route_regex = route_path_to_regex(&entry.path).expect("should compile regex");
+        if has_url_match(test_source, &route_regex) {
+            entry
+                .test_files
+                .push("tests/Feature/UserControllerTest.php".to_string());
+            entry.status = ROUTE_STATUS_COVERED.to_string();
+        }
+
+        assert_eq!(
+            entry.status, ROUTE_STATUS_COVERED,
+            "route GET /users/{{id}} should be 'covered' after dynamic URL match, got: {}",
+            entry.status
+        );
+    }
+
+    // TC-03-int: closure route GET /about remains "unmappable" when no test hits the path
+    #[test]
+    fn url_match_tc03_closure_route_remains_unmappable_when_no_test_hits_path() {
+        // Given: ObserveRouteEntry for "GET /about" with no test_files (unmappable)
+        //        And test source that does NOT contain "/about"
+        // When: URL path matching is applied
+        // Then: entry.status remains "unmappable"
+        let test_source = r#"
+class HomeTest extends TestCase {
+    public function test_home(): void {
+        $this->get('/')->assertStatus(200);
+    }
+}
+"#;
+        let mut entry = ObserveRouteEntry {
+            http_method: "GET".to_string(),
+            path: "/about".to_string(),
+            handler: String::new(),
+            file: "routes/web.php".to_string(),
+            test_files: vec![],
+            status: ROUTE_STATUS_UNMAPPABLE.to_string(),
+            gap_reasons: vec![],
+        };
+
+        let route_regex = route_path_to_regex(&entry.path).expect("should compile regex");
+        if has_url_match(test_source, &route_regex) {
+            entry
+                .test_files
+                .push("tests/Feature/HomeTest.php".to_string());
+            entry.status = ROUTE_STATUS_COVERED.to_string();
+        }
+
+        assert_eq!(
+            entry.status, ROUTE_STATUS_UNMAPPABLE,
+            "route GET /about should remain 'unmappable' when no test hits '/about', got: {}",
+            entry.status
+        );
+        assert!(
+            entry.test_files.is_empty(),
+            "test_files should remain empty when no URL match found"
+        );
+    }
+
+    // TC-04-int: Flask route POST /api/auth/verify becomes "covered" via Python test URL match
+    #[test]
+    fn url_match_tc04_flask_route_becomes_covered_via_python_url_match() {
+        // Given: ObserveRouteEntry for "POST /api/auth/verify" with no test_files (unmappable)
+        //        And Python test source containing client.post('/api/auth/verify')
+        // When: URL path matching is applied
+        // Then: entry.status == "covered"
+        let test_source = r#"
+def test_verify_auth(client):
+    response = client.post('/api/auth/verify', json={'token': 'test-token'})
+    assert response.status_code == 200
+    assert response.json['verified'] is True
+"#;
+        let mut entry = ObserveRouteEntry {
+            http_method: "POST".to_string(),
+            path: "/api/auth/verify".to_string(),
+            handler: "verify".to_string(),
+            file: "app/routes/auth.py".to_string(),
+            test_files: vec![],
+            status: ROUTE_STATUS_UNMAPPABLE.to_string(),
+            gap_reasons: vec![],
+        };
+
+        let route_regex = route_path_to_regex(&entry.path).expect("should compile regex");
+        if has_url_match(test_source, &route_regex) {
+            entry.test_files.push("tests/test_auth.py".to_string());
+            entry.status = ROUTE_STATUS_COVERED.to_string();
+        }
+
+        assert_eq!(
+            entry.status, ROUTE_STATUS_COVERED,
+            "Flask route POST /api/auth/verify should be 'covered' after Python URL match, got: {}",
+            entry.status
         );
     }
 }

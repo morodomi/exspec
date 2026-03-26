@@ -21,6 +21,7 @@ exspec-lang-php.workspace = true
 exspec-lang-rust.workspace = true
 clap = { version = "4", features = ["derive"] }
 ignore = "0.4"
+regex = "1"
 toml = "0.8"
 
 [dev-dependencies]
