@@ -21,3 +21,10 @@
       (identifier) @symbol_name))
   source: (string
     (string_fragment) @module_specifier))
+
+;; Dynamic import: import('./module') or await import('./module')
+(call_expression
+  function: (import)
+  arguments: (arguments
+    (string
+      (string_fragment) @module_specifier)))
