@@ -554,7 +554,40 @@ fn run_observe(args: ObserveArgs) {
                         args.l1_exclusive,
                     )
                 },
-                |_| Vec::new(),
+                |_| {
+                    // Laravel route extraction from routes/*.php
+                    let mut all_routes = Vec::new();
+                    let routes_dir = std::path::Path::new(root).join("routes");
+                    if routes_dir.is_dir() {
+                        for entry in std::fs::read_dir(&routes_dir)
+                            .into_iter()
+                            .flatten()
+                            .flatten()
+                        {
+                            let path = entry.path();
+                            if path.extension().and_then(|e| e.to_str()) == Some("php") {
+                                let file_path = path.to_string_lossy().into_owned();
+                                if let Ok(source) = std::fs::read_to_string(&path) {
+                                    let routes = php_ext.extract_routes(&source, &file_path);
+                                    all_routes.extend(routes.into_iter().map(|r| {
+                                        ObserveRouteEntry {
+                                            http_method: r.http_method,
+                                            path: r.path,
+                                            handler: if r.class_name.is_empty() {
+                                                r.handler_name
+                                            } else {
+                                                format!("{}.{}", r.class_name, r.handler_name)
+                                            },
+                                            file: r.file,
+                                            test_files: Vec::new(),
+                                        }
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                    all_routes
+                },
             );
         }
         _ => {
