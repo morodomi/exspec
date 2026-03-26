@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use streaming_iterator::StreamingIterator;
@@ -653,6 +653,38 @@ fn python_module_to_absolute_specifier(module: &str) -> String {
 // Concrete methods (not in trait)
 // ---------------------------------------------------------------------------
 
+/// Search depth 1 and depth 2 subdirectories of `scan_root` for a `manage.py` file.
+///
+/// Returns the first subdirectory that contains `manage.py`, or `None` if
+/// `manage.py` exists at `scan_root` itself (already covered by canonical_root)
+/// or no subdirectory contains `manage.py`.
+pub fn find_manage_py_root(scan_root: &Path) -> Option<PathBuf> {
+    // scan_root itself has manage.py → already covered by canonical_root
+    if scan_root.join("manage.py").exists() {
+        return None;
+    }
+    // Depth 1
+    for entry in scan_root.read_dir().ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join("manage.py").exists() {
+            return Some(path);
+        }
+    }
+    // Depth 2
+    for entry in scan_root.read_dir().ok()?.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            for inner in path.read_dir().into_iter().flatten().flatten() {
+                let inner_path = inner.path();
+                if inner_path.is_dir() && inner_path.join("manage.py").exists() {
+                    return Some(inner_path);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Extract the set of import symbol names that appear (directly or via
 /// variable chain) inside assertion nodes.
 ///
@@ -859,6 +891,7 @@ impl PythonExtractor {
             Ok(r) => r,
             Err(_) => return mappings,
         };
+        let manage_py_root = find_manage_py_root(scan_root).and_then(|p| p.canonicalize().ok());
         let mut canonical_to_idx: HashMap<String, usize> = HashMap::new();
         for (idx, prod) in filtered_production_files.iter().enumerate() {
             if let Ok(canonical) = Path::new(prod).canonicalize() {
@@ -926,6 +959,9 @@ impl PythonExtractor {
             .collect();
 
         // Layer 2: import tracing
+        // Track production file indices matched ONLY via manage_py_root fallback
+        // (needed to upgrade strategy to ImportTracing for Django-layout projects)
+        let mut manage_py_only_prods: HashSet<usize> = HashSet::new();
         for (test_file, source) in test_sources {
             if l1_exclusive && l1_matched_tests.contains(test_file.as_str()) {
                 continue;
@@ -1037,7 +1073,7 @@ impl PythonExtractor {
             let abs_specifiers = self.extract_all_import_specifiers(source);
             for (specifier, symbols) in &abs_specifiers {
                 let base = canonical_root.join(specifier);
-                let resolved = exspec_core::observe::resolve_absolute_base_to_file(
+                let standard_resolved = exspec_core::observe::resolve_absolute_base_to_file(
                     self,
                     &base,
                     &canonical_root,
@@ -1049,6 +1085,19 @@ impl PythonExtractor {
                         &src_base,
                         &canonical_root,
                     )
+                });
+                let via_manage_py = standard_resolved.is_none() && manage_py_root.is_some();
+                let resolved = standard_resolved.or_else(|| {
+                    if let Some(ref mpr) = manage_py_root {
+                        let django_base = mpr.join(specifier);
+                        exspec_core::observe::resolve_absolute_base_to_file(
+                            self,
+                            &django_base,
+                            &canonical_root,
+                        )
+                    } else {
+                        None
+                    }
                 });
                 if let Some(resolved) = resolved {
                     // Barrel suppression: skip barrel-resolved imports for L1-matched tests
@@ -1074,6 +1123,12 @@ impl PythonExtractor {
                     if is_direct {
                         for &idx in all_matched.difference(&before) {
                             direct_import_indices.insert(idx);
+                        }
+                    }
+                    // Track manage_py_root-only matches separately
+                    if via_manage_py && is_direct {
+                        for &idx in all_matched.difference(&before) {
+                            manage_py_only_prods.insert(idx);
                         }
                     }
                 }
@@ -1114,11 +1169,16 @@ impl PythonExtractor {
             }
         }
 
-        // Update strategy: if a production file had no Layer 1 matches (core + stem-only fallback)
-        // but has Layer 2 matches, set strategy to ImportTracing
+        // Update strategy:
+        // - If a production file had no Layer 1 matches but has L2 matches → ImportTracing
+        // - If a production file was matched via manage_py_root fallback (Django layout),
+        //   upgrade to ImportTracing regardless of L1 stem-only match
         for (i, mapping) in mappings.iter_mut().enumerate() {
             let has_layer1 = !layer1_extended_tests_per_prod[i].is_empty();
-            if !has_layer1 && !mapping.test_files.is_empty() {
+            if manage_py_only_prods.contains(&i) {
+                // Matched via Django manage.py root fallback → ImportTracing
+                mapping.strategy = MappingStrategy::ImportTracing;
+            } else if !has_layer1 && !mapping.test_files.is_empty() {
                 mapping.strategy = MappingStrategy::ImportTracing;
             }
         }
@@ -2654,6 +2714,88 @@ def endpoint():
             MappingStrategy::ImportTracing,
             "expected ImportTracing strategy, got {:?}",
             mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-01: Django project with project/manage.py and from app.models import X
+    //        -> test maps to project/app/models.py via manage.py root fallback
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_l2_django_managepy_root_tc01_subdirectory_layout() {
+        // Given: Django project with project/manage.py, project/app/models.py
+        //        and a test file with `from app.models import MyModel`
+        let tmp = tempfile::tempdir().unwrap();
+
+        let manage_py_path = tmp.path().join("project").join("manage.py");
+        std::fs::create_dir_all(manage_py_path.parent().unwrap()).unwrap();
+        std::fs::write(&manage_py_path, "#!/usr/bin/env python\n").unwrap();
+
+        let prod_rel = "project/app/models.py";
+        let prod_abs = tmp.path().join(prod_rel);
+        std::fs::create_dir_all(prod_abs.parent().unwrap()).unwrap();
+        std::fs::write(&prod_abs, "class MyModel:\n    pass\n").unwrap();
+
+        let test_rel = "tests/test_models.py";
+        let test_abs = tmp.path().join(test_rel);
+        std::fs::create_dir_all(test_abs.parent().unwrap()).unwrap();
+        let test_content = "from app.models import MyModel\n\ndef test_mymodel():\n    pass\n";
+        std::fs::write(&test_abs, test_content).unwrap();
+
+        let extractor = PythonExtractor::new();
+        let prod_path = prod_abs.to_string_lossy().into_owned();
+        let test_path = test_abs.to_string_lossy().into_owned();
+        let production_files = vec![prod_path.clone()];
+        let test_sources: HashMap<String, String> = [(test_path.clone(), test_content.to_string())]
+            .into_iter()
+            .collect();
+
+        // When: observe runs
+        let mappings = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            tmp.path(),
+            false,
+        );
+
+        // Then: test maps to project/app/models.py via manage.py root fallback
+        let mapping = mappings.iter().find(|m| m.production_file == prod_path);
+        assert!(
+            mapping.is_some(),
+            "project/app/models.py not found in mappings: {:?}",
+            mappings
+        );
+        let mapping = mapping.unwrap();
+        assert!(
+            mapping.test_files.contains(&test_path),
+            "tests/test_models.py not in test_files for project/app/models.py: {:?}",
+            mapping.test_files
+        );
+        assert_eq!(
+            mapping.strategy,
+            MappingStrategy::ImportTracing,
+            "expected ImportTracing strategy, got {:?}",
+            mapping.strategy
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-03: find_manage_py_root returns None when manage.py is at scan_root itself
+    // -----------------------------------------------------------------------
+    #[test]
+    fn py_l2_django_managepy_root_tc03_at_scan_root_returns_none() {
+        // Given: manage.py at scan_root itself (not in a subdirectory)
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("manage.py"), "#!/usr/bin/env python\n").unwrap();
+
+        // When: find_manage_py_root is called with scan_root
+        let result = find_manage_py_root(tmp.path());
+
+        // Then: returns None (manage.py at scan_root is already covered by canonical_root)
+        assert!(
+            result.is_none(),
+            "expected None when manage.py is at scan_root, got {:?}",
+            result
         );
     }
 }
