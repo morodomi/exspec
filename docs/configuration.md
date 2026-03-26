@@ -24,7 +24,7 @@ T101 = "info"
 [thresholds]
 mock_max = 5
 mock_class_max = 3
-test_max_lines = 50
+test_max_lines = 75               # overrides language-specific defaults
 parameterized_min_ratio = 0.1
 
 [paths]

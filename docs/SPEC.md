@@ -617,7 +617,7 @@ disable = ["T004", "T005"]         # 無効化するルールID
 [thresholds]
 mock_max = 5                       # T002: 1テスト関数内のmock数上限
 mock_class_max = 3                 # T002: 異なるクラスのmock数上限
-test_max_lines = 50                # T003: テスト関数行数上限
+test_max_lines = 75                # T003: テスト関数行数上限 (overrides language defaults)
 parameterized_min_ratio = 0.1      # T004: パラメタライズドテスト比率下限
 
 [paths]
@@ -737,7 +737,7 @@ tree-sitter AST note: `attribute_item` and `function_item` are sibling nodes (no
 |------|-------------|-------|
 | T001 assertion-free | `assert!`, `assert_eq!`, `assert_ne!`, `debug_assert!` | Macro invocations |
 | T002 mock-overuse | `MockXxx::new()` (mockall crate) | `let mock_xxx = MockXxx::new()` for class names |
-| T003 giant-test | Line count of `fn` body | Same threshold (50 lines) |
+| T003 giant-test | Line count of `fn` body | Default: 100 lines (Rust) |
 | T004 no-parameterized | `#[rstest]` attribute (rstest crate) | |
 | T005 pbt-missing | `use proptest` / `use quickcheck` | |
 | T006 low-assertion-density | Total assertions / total functions | |
