@@ -12,6 +12,21 @@ use exspec_core::observe::{
 
 use super::PhpExtractor;
 
+// ---------------------------------------------------------------------------
+// Route struct (Laravel route extraction)
+// ---------------------------------------------------------------------------
+
+/// A route extracted from a Laravel routes/*.php file.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Route {
+    pub http_method: String,
+    pub path: String,
+    pub handler_name: String,
+    pub class_name: String,
+    pub file: String,
+    pub line: usize,
+}
+
 const PRODUCTION_FUNCTION_QUERY: &str = include_str!("../queries/production_function.scm");
 static PRODUCTION_FUNCTION_QUERY_CACHE: OnceLock<Query> = OnceLock::new();
 
@@ -249,6 +264,391 @@ fn is_external_namespace(namespace: &str, scan_root: Option<&Path>) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Route extraction helpers (Laravel)
+// ---------------------------------------------------------------------------
+
+/// Known Laravel route HTTP methods.
+const LARAVEL_HTTP_METHODS: &[&str] = &["get", "post", "put", "patch", "delete", "any"];
+
+/// A prefix group: (prefix_value, group_body_start_byte, group_body_end_byte)
+type PrefixGroup = (String, usize, usize);
+
+/// Walk the AST and collect all `Route::prefix('...')` groups.
+/// Returns a list of (prefix, start_byte, end_byte) for the closure/arrow body.
+fn collect_prefix_groups(node: tree_sitter::Node, src: &[u8]) -> Vec<PrefixGroup> {
+    let mut groups = Vec::new();
+    collect_prefix_groups_recursive(node, src, &mut groups);
+    groups
+}
+
+fn collect_prefix_groups_recursive(
+    node: tree_sitter::Node,
+    src: &[u8],
+    groups: &mut Vec<PrefixGroup>,
+) {
+    // Check if this node is a `Route::prefix(...)->group(...)` call
+    if node.kind() == "member_call_expression" {
+        if let Some((prefix, body_start, body_end)) = try_extract_prefix_group(node, src) {
+            groups.push((prefix, body_start, body_end));
+        }
+    }
+    // Recurse into children
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_prefix_groups_recursive(child, src, groups);
+    }
+}
+
+/// Try to extract prefix + group body from a `member_call_expression` node.
+/// Matches: `Route::prefix('admin')->group(function () { ... })`
+/// and also chained: `Route::middleware('auth')->group(...)` -> returns None (no prefix).
+fn try_extract_prefix_group(node: tree_sitter::Node, src: &[u8]) -> Option<(String, usize, usize)> {
+    // node is member_call_expression
+    // structure: object->name(arguments)
+    // object = scoped_call_expression (Route::prefix('admin')) OR another member_call_expression
+    // name = "group"
+    let name_node = node.child_by_field_name("name")?;
+    let method_name = name_node.utf8_text(src).ok()?;
+    if method_name != "group" {
+        return None;
+    }
+
+    // Get the object (should be scoped_call_expression or member_call_expression chain)
+    let object_node = node.child_by_field_name("object")?;
+
+    // Extract prefix from the chain
+    let prefix = extract_prefix_from_chain(object_node, src)?;
+
+    // Get group's closure/arrow body byte range
+    let args_node = node.child_by_field_name("arguments")?;
+    let body_range = find_closure_body_range(args_node, src)?;
+
+    Some((prefix, body_range.0, body_range.1))
+}
+
+/// Recursively extract the prefix string from a method chain.
+/// `Route::prefix('admin')` -> Some("admin")
+/// `Route::middleware('auth')` -> None (not a prefix call)
+/// `Route::prefix('api')->middleware('auth')` -> Some("api")  (still has prefix)
+fn extract_prefix_from_chain(node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    match node.kind() {
+        "scoped_call_expression" => {
+            // Route::prefix('admin') or Route::middleware('auth')
+            let method_node = node.child_by_field_name("name")?;
+            let method = method_node.utf8_text(src).ok()?;
+            if method == "prefix" {
+                let args = node.child_by_field_name("arguments")?;
+                extract_first_string_arg(args, src)
+            } else {
+                None
+            }
+        }
+        "member_call_expression" => {
+            // Chain like Route::prefix('api')->middleware('auth')
+            // Walk back to find if there's a prefix call in the chain
+            let object_node = node.child_by_field_name("object")?;
+            extract_prefix_from_chain(object_node, src)
+        }
+        _ => None,
+    }
+}
+
+/// Find the byte range of the closure/arrow function body inside arguments.
+/// PHP uses `anonymous_function` and `arrow_function` node kinds.
+fn find_closure_body_range(args_node: tree_sitter::Node, _src: &[u8]) -> Option<(usize, usize)> {
+    // Walk through argument nodes to find the closure/arrow function
+    let mut cursor = args_node.walk();
+    for child in args_node.named_children(&mut cursor) {
+        // Direct closure/arrow
+        if let Some(range) = closure_node_range(child) {
+            return Some(range);
+        }
+        // Wrapped in argument node
+        if child.kind() == "argument" {
+            let mut ac = child.walk();
+            for grandchild in child.named_children(&mut ac) {
+                if let Some(range) = closure_node_range(grandchild) {
+                    return Some(range);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn closure_node_range(node: tree_sitter::Node) -> Option<(usize, usize)> {
+    match node.kind() {
+        "anonymous_function" | "arrow_function" | "closure_expression" => {
+            Some((node.start_byte(), node.end_byte()))
+        }
+        _ => None,
+    }
+}
+
+/// Extract the first string literal argument from an arguments node.
+fn extract_first_string_arg(args_node: tree_sitter::Node, src: &[u8]) -> Option<String> {
+    let mut cursor = args_node.walk();
+    for child in args_node.named_children(&mut cursor) {
+        if child.kind() == "encapsed_string" || child.kind() == "string" {
+            let raw = child.utf8_text(src).ok()?;
+            return Some(strip_php_string_quotes(raw));
+        }
+        // Also check argument nodes that wrap the string
+        if child.kind() == "argument" {
+            let mut child_cursor = child.walk();
+            for grandchild in child.named_children(&mut child_cursor) {
+                if grandchild.kind() == "encapsed_string" || grandchild.kind() == "string" {
+                    let raw = grandchild.utf8_text(src).ok()?;
+                    return Some(strip_php_string_quotes(raw));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Strip PHP string quotes: `'admin'` -> `admin`, `"admin"` -> `admin`
+fn strip_php_string_quotes(s: &str) -> String {
+    let s = s.trim();
+    if (s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')) {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Walk AST and collect route calls (Route::get/post/etc.) into routes vec.
+fn collect_routes(
+    node: tree_sitter::Node,
+    src: &[u8],
+    file_path: &str,
+    prefix_groups: &[PrefixGroup],
+    routes: &mut Vec<Route>,
+) {
+    // Check if this is a scoped_call_expression: Route::<method>(...)
+    if node.kind() == "scoped_call_expression" {
+        if let Some(route) = try_extract_route(node, src, file_path, prefix_groups) {
+            routes.push(route);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_routes(child, src, file_path, prefix_groups, routes);
+    }
+}
+
+/// Try to extract a Route from a scoped_call_expression node.
+fn try_extract_route(
+    node: tree_sitter::Node,
+    src: &[u8],
+    file_path: &str,
+    prefix_groups: &[PrefixGroup],
+) -> Option<Route> {
+    // Check scope == "Route"
+    let scope_node = node.child_by_field_name("scope")?;
+    let scope = scope_node.utf8_text(src).ok()?;
+    if scope != "Route" {
+        return None;
+    }
+
+    // Check method is a known HTTP method
+    let method_node = node.child_by_field_name("name")?;
+    let method = method_node.utf8_text(src).ok()?;
+    if !LARAVEL_HTTP_METHODS.contains(&method) {
+        return None;
+    }
+
+    let http_method = method.to_uppercase();
+    let line = node.start_position().row + 1;
+    let byte_offset = node.start_byte();
+
+    // Extract path and handler from arguments
+    let args_node = node.child_by_field_name("arguments")?;
+    let (path_raw, handler_name, class_name) = extract_route_args(args_node, src)?;
+
+    // Resolve prefix from groups containing this byte offset
+    let prefix = resolve_prefix(byte_offset, prefix_groups);
+
+    // Combine prefix + path
+    let path = if prefix.is_empty() {
+        path_raw
+    } else {
+        // Remove leading slash from path_raw when combining with prefix
+        let path_part = path_raw.trim_start_matches('/');
+        format!("{prefix}/{path_part}")
+    };
+
+    Some(Route {
+        http_method,
+        path,
+        handler_name,
+        class_name,
+        file: file_path.to_string(),
+        line,
+    })
+}
+
+/// Extract (path, handler_name, class_name) from a route call's arguments.
+fn extract_route_args(
+    args_node: tree_sitter::Node,
+    src: &[u8],
+) -> Option<(String, String, String)> {
+    let args: Vec<tree_sitter::Node> = {
+        let mut cursor = args_node.walk();
+        args_node
+            .named_children(&mut cursor)
+            .filter(|n| n.kind() == "argument" || is_value_node(n.kind()))
+            .collect()
+    };
+
+    // Normalize: unwrap argument nodes
+    let values: Vec<tree_sitter::Node> = args
+        .iter()
+        .flat_map(|n| {
+            if n.kind() == "argument" {
+                let mut c = n.walk();
+                n.named_children(&mut c).collect::<Vec<_>>()
+            } else {
+                vec![*n]
+            }
+        })
+        .collect();
+
+    if values.is_empty() {
+        return None;
+    }
+
+    // First arg: path (string)
+    let path_node = values.first()?;
+    let path_raw = path_node.utf8_text(src).ok()?;
+    let path = strip_php_string_quotes(path_raw);
+
+    // Second arg: handler (array or closure/arrow)
+    let handler_name;
+    let class_name;
+
+    if let Some(handler_node) = values.get(1) {
+        match handler_node.kind() {
+            "array_creation_expression" => {
+                // [ControllerClass::class, 'method']
+                let (cls, method) = extract_controller_array(*handler_node, src);
+                class_name = cls;
+                handler_name = method;
+            }
+            "closure_expression" | "arrow_function" | "anonymous_class" => {
+                class_name = String::new();
+                handler_name = String::new();
+            }
+            _ => {
+                class_name = String::new();
+                handler_name = String::new();
+            }
+        }
+    } else {
+        class_name = String::new();
+        handler_name = String::new();
+    }
+
+    Some((path, handler_name, class_name))
+}
+
+fn is_value_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "encapsed_string"
+            | "string"
+            | "array_creation_expression"
+            | "closure_expression"
+            | "arrow_function"
+            | "anonymous_class"
+            | "name"
+    )
+}
+
+/// Extract (class_name, method_name) from `[ControllerClass::class, 'method']`.
+fn extract_controller_array(array_node: tree_sitter::Node, src: &[u8]) -> (String, String) {
+    let mut cursor = array_node.walk();
+    let elements: Vec<tree_sitter::Node> = array_node
+        .named_children(&mut cursor)
+        .filter(|n| n.kind() == "array_element_initializer")
+        .collect();
+
+    let mut class_name = String::new();
+    let mut method_name = String::new();
+
+    // First element: ControllerClass::class
+    if let Some(elem0) = elements.first() {
+        let mut ec = elem0.walk();
+        for child in elem0.named_children(&mut ec) {
+            if child.kind() == "class_constant_access_expression" {
+                // Structure: scope::class
+                if let Some(scope) = child.child_by_field_name("class") {
+                    class_name = scope.utf8_text(src).unwrap_or("").to_string();
+                    // Remove FQCN prefix: keep only the last segment
+                    if let Some(last) = class_name.rsplit('\\').next() {
+                        class_name = last.to_string();
+                    }
+                } else {
+                    // Fallback: first named child
+                    let mut cc = child.walk();
+                    let first_child_text: Option<String> = child
+                        .named_children(&mut cc)
+                        .next()
+                        .and_then(|n| n.utf8_text(src).ok())
+                        .map(|s| s.to_string());
+                    drop(cc);
+                    if let Some(raw) = first_child_text {
+                        if let Some(last) = raw.rsplit('\\').next() {
+                            class_name = last.to_string();
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Second element: 'method'
+    if let Some(elem1) = elements.get(1) {
+        let mut ec = elem1.walk();
+        for child in elem1.named_children(&mut ec) {
+            if child.kind() == "encapsed_string" || child.kind() == "string" {
+                let raw = child.utf8_text(src).unwrap_or("");
+                method_name = strip_php_string_quotes(raw);
+                break;
+            }
+        }
+    }
+
+    (class_name, method_name)
+}
+
+/// Find the accumulated prefix for a given byte offset within prefix groups.
+/// Groups are sorted by start byte; outermost first, innermost last.
+fn resolve_prefix(byte_offset: usize, groups: &[PrefixGroup]) -> String {
+    // Collect all groups that contain this byte offset
+    let mut containing: Vec<&PrefixGroup> = groups
+        .iter()
+        .filter(|(_, start, end)| byte_offset > *start && byte_offset < *end)
+        .collect();
+
+    if containing.is_empty() {
+        return String::new();
+    }
+
+    // Sort by start byte (outermost first)
+    containing.sort_by_key(|(_, start, _)| *start);
+
+    // Accumulate prefixes from outermost to innermost
+    containing
+        .iter()
+        .map(|(p, _, _)| p.as_str())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+// ---------------------------------------------------------------------------
 // ObserveExtractor impl
 // ---------------------------------------------------------------------------
 
@@ -421,6 +821,35 @@ impl ObserveExtractor for PhpExtractor {
 // ---------------------------------------------------------------------------
 
 impl PhpExtractor {
+    /// Extract Laravel routes from a routes/*.php file.
+    pub fn extract_routes(&self, source: &str, file_path: &str) -> Vec<Route> {
+        if source.is_empty() {
+            return Vec::new();
+        }
+
+        let mut parser = Self::parser();
+        let tree = match parser.parse(source, None) {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let source_bytes = source.as_bytes();
+
+        // Collect prefix groups: (prefix_str, group_body_start_byte, group_body_end_byte)
+        let prefix_groups = collect_prefix_groups(tree.root_node(), source_bytes);
+
+        // Walk tree and collect routes
+        let mut routes = Vec::new();
+        collect_routes(
+            tree.root_node(),
+            source_bytes,
+            file_path,
+            &prefix_groups,
+            &mut routes,
+        );
+
+        routes
+    }
+
     /// Extract all import specifiers without external namespace filtering.
     /// Returns (module_path, [symbols]) pairs for all `use` statements.
     fn extract_raw_import_specifiers(source: &str) -> Vec<(String, Vec<String>)> {
@@ -1703,5 +2132,128 @@ class BTest extends ATest {}"#;
         unimplemented!(
             "Integration test: run `cargo run -- observe --lang php --format json /tmp/laravel`"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-01: Controller array syntax -> Route{ GET, /users, index, UserController }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc01_controller_array_syntax() {
+        // Given: a route file with Route::get pointing to a controller array
+        let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+Route::get('/users', [UserController::class, 'index']);
+"#;
+        let extractor = PhpExtractor;
+
+        // When: extract_routes is called
+        let routes = extractor.extract_routes(source, "routes/web.php");
+
+        // Then: one route with GET /users, handler=index, class=UserController
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.http_method, "GET");
+        assert_eq!(r.path, "/users");
+        assert_eq!(r.handler_name, "index");
+        assert_eq!(r.class_name, "UserController");
+        assert_eq!(r.file, "routes/web.php");
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-02: Closure handler -> Route{ POST, /users, "", "" }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc02_closure_handler() {
+        // Given: a route file with Route::post using a closure handler
+        let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+Route::post('/users', fn () => response()->json(['ok' => true]));
+"#;
+        let extractor = PhpExtractor;
+
+        // When: extract_routes is called
+        let routes = extractor.extract_routes(source, "routes/web.php");
+
+        // Then: one route with POST /users, handler="" and class="" (closure, no named handler)
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.http_method, "POST");
+        assert_eq!(r.path, "/users");
+        assert_eq!(r.handler_name, "");
+        assert_eq!(r.class_name, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-03: prefix group (depth 1) -> Route{ GET, admin/users, ... }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc03_prefix_group_depth1() {
+        // Given: a route file with a single prefix->group wrapping an inner route
+        let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+Route::prefix('admin')->group(function () {
+    Route::get('/users', [UserController::class, 'index']);
+});
+"#;
+        let extractor = PhpExtractor;
+
+        // When: extract_routes is called
+        let routes = extractor.extract_routes(source, "routes/web.php");
+
+        // Then: one route with resolved path admin/users
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.http_method, "GET");
+        assert_eq!(r.path, "admin/users");
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-04: nested prefix group (depth 2) -> Route{ GET, api/v1/users, ... }
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc04_nested_prefix_group_depth2() {
+        // Given: a route file with two nested prefix->group blocks
+        let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+Route::prefix('api')->group(fn() =>
+    Route::prefix('v1')->group(fn() =>
+        Route::get('/users', [UserController::class, 'index'])
+    )
+);
+"#;
+        let extractor = PhpExtractor;
+
+        // When: extract_routes is called
+        let routes = extractor.extract_routes(source, "routes/web.php");
+
+        // Then: one route with resolved path api/v1/users
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.http_method, "GET");
+        assert_eq!(r.path, "api/v1/users");
+    }
+
+    // -----------------------------------------------------------------------
+    // TC-05: middleware group (no prefix) -> path unaffected
+    // -----------------------------------------------------------------------
+    #[test]
+    fn tc05_middleware_group_no_prefix_effect() {
+        // Given: a route file where routes are wrapped in a middleware group only
+        let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+Route::middleware('auth')->group(function () {
+    Route::get('/dashboard', [DashboardController::class, 'index']);
+});
+"#;
+        let extractor = PhpExtractor;
+
+        // When: extract_routes is called
+        let routes = extractor.extract_routes(source, "routes/web.php");
+
+        // Then: one route with path /dashboard (middleware does not alter path)
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.http_method, "GET");
+        assert_eq!(r.path, "/dashboard");
     }
 }
