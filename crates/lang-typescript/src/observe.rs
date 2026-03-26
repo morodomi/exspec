@@ -669,28 +669,44 @@ impl TypeScriptExtractor {
                     specifier = Some(cap.node.utf8_text(source_bytes).unwrap_or(""));
                 }
             }
-            if let (Some(sym), Some(spec)) = (symbol, specifier) {
+            if let Some(spec) = specifier {
                 // Filter: only relative paths (./ or ../)
                 if !spec.starts_with("./") && !spec.starts_with("../") {
                     continue;
                 }
 
-                // Filter: skip type-only imports
-                // `import type { X }` → import_statement has "type" keyword child
-                // `import { type X }` → import_specifier has "type" keyword child
-                if let Some(snode) = symbol_node {
-                    if is_type_only_import(snode) {
-                        continue;
+                if let Some(sym) = symbol {
+                    // Static import with a symbol name
+                    // Filter: skip type-only imports
+                    // `import type { X }` → import_statement has "type" keyword child
+                    // `import { type X }` → import_specifier has "type" keyword child
+                    if let Some(snode) = symbol_node {
+                        if is_type_only_import(snode) {
+                            continue;
+                        }
+                    }
+
+                    result.push(ImportMapping {
+                        symbol_name: sym.to_string(),
+                        module_specifier: spec.to_string(),
+                        file: file_path.to_string(),
+                        line: symbol_line,
+                        symbols: Vec::new(),
+                    });
+                } else {
+                    // Dynamic import: import('./module') — no symbol captured
+                    // Add a sentinel entry so the module_specifier flows through resolution.
+                    // Deduplicate: skip if we already have an entry for this specifier.
+                    if !result.iter().any(|e| e.module_specifier == spec) {
+                        result.push(ImportMapping {
+                            symbol_name: String::new(),
+                            module_specifier: spec.to_string(),
+                            file: file_path.to_string(),
+                            line: 0,
+                            symbols: Vec::new(),
+                        });
                     }
                 }
-
-                result.push(ImportMapping {
-                    symbol_name: sym.to_string(),
-                    module_specifier: spec.to_string(),
-                    file: file_path.to_string(),
-                    line: symbol_line,
-                    symbols: Vec::new(),
-                });
             }
         }
         // Populate `symbols`: for each entry, collect all symbol_names that share the same
@@ -740,21 +756,29 @@ impl TypeScriptExtractor {
                     specifier = Some(cap.node.utf8_text(source_bytes).unwrap_or(""));
                 }
             }
-            if let (Some(sym), Some(spec)) = (symbol, specifier) {
+            if let Some(spec) = specifier {
                 // Skip relative imports (already handled by extract_imports)
                 if spec.starts_with("./") || spec.starts_with("../") {
                     continue;
                 }
-                // Skip type-only imports
-                if let Some(snode) = symbol_node {
-                    if is_type_only_import(snode) {
-                        continue;
+                if let Some(sym) = symbol {
+                    // Static import with a symbol name
+                    // Skip type-only imports
+                    if let Some(snode) = symbol_node {
+                        if is_type_only_import(snode) {
+                            continue;
+                        }
                     }
+                    specifier_symbols
+                        .entry(spec.to_string())
+                        .or_default()
+                        .push(sym.to_string());
+                } else {
+                    // Dynamic import with non-relative path (e.g. @/lib/foo)
+                    // Ensure the specifier is registered even with no symbols so it flows
+                    // through alias resolution.
+                    specifier_symbols.entry(spec.to_string()).or_default();
                 }
-                specifier_symbols
-                    .entry(spec.to_string())
-                    .or_default()
-                    .push(sym.to_string());
             }
         }
 
@@ -3780,21 +3804,127 @@ describe('UsersController', () => {});
         );
     }
 
-    // TC-08: Boundary B5 — dynamic import() is not captured by extract_imports
+    // TC-04: boundary_b5 updated — dynamic import() IS extracted (implementation pending)
     #[test]
     fn boundary_b5_dynamic_import_not_extracted() {
-        // Given: fixture("import_dynamic.ts") containing `const m = await import('./user.service')`
+        // Given: fixture("import_dynamic.ts") containing `await import('./user.service')` and
+        //        `const { foo } = await import('./bar')`
         let source = fixture("import_dynamic.ts");
         let extractor = TypeScriptExtractor::new();
 
         // When: extract_imports
         let imports = extractor.extract_imports(&source, "import_dynamic.ts");
 
-        // Then: imports is empty (dynamic import() not captured by import_mapping.scm)
+        // Then: dynamic imports are extracted — at least './user.service' and './bar' are present
+        let specifiers: Vec<&str> = imports
+            .iter()
+            .map(|i| i.module_specifier.as_str())
+            .collect();
         assert!(
-            imports.is_empty(),
-            "expected empty imports for dynamic import(), got {:?}",
-            imports
+            specifiers.contains(&"./user.service"),
+            "expected './user.service' in imports, got {imports:?}"
+        );
+        assert!(
+            specifiers.contains(&"./bar"),
+            "expected './bar' in imports, got {imports:?}"
+        );
+    }
+
+    // TC-01: dynamic import with bare `await import('./user.service')` maps to user.service.ts
+    #[test]
+    fn tc01_dynamic_import_relative_maps_to_module() {
+        // Given: source with `await import('./user.service')` and no static imports
+        let source = "describe('x', () => { it('y', async () => { const m = await import('./user.service'); }); });";
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(source, "test.ts");
+
+        // Then: module_specifier './user.service' is present
+        let found = imports
+            .iter()
+            .find(|i| i.module_specifier == "./user.service");
+        assert!(
+            found.is_some(),
+            "expected './user.service' in imports, got {imports:?}"
+        );
+    }
+
+    // TC-03: destructured dynamic import `const { foo } = await import('./bar')` maps to bar.ts
+    #[test]
+    fn tc03_destructured_dynamic_import_maps_to_module() {
+        // Given: source with `const { foo } = await import('./bar')`
+        let source = "describe('x', () => { it('y', async () => { const { foo } = await import('./bar'); }); });";
+        let extractor = TypeScriptExtractor::new();
+
+        // When: extract_imports
+        let imports = extractor.extract_imports(source, "test.ts");
+
+        // Then: module_specifier './bar' is present
+        let found = imports.iter().find(|i| i.module_specifier == "./bar");
+        assert!(
+            found.is_some(),
+            "expected './bar' in imports, got {imports:?}"
+        );
+    }
+
+    // TC-02: dynamic import with @/ path alias resolves to production file via tsconfig
+    #[test]
+    fn tc02_dynamic_import_path_alias_resolves_to_production_file() {
+        use tempfile::TempDir;
+
+        // Given:
+        //   tsconfig.json: @/* -> src/*
+        //   src/lib/api-client.ts (production)
+        //   test/api-client.test.ts: `await import('@/lib/api-client')`
+        let dir = TempDir::new().unwrap();
+        let src_lib_dir = dir.path().join("src").join("lib");
+        let test_dir = dir.path().join("test");
+        std::fs::create_dir_all(&src_lib_dir).unwrap();
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let tsconfig = dir.path().join("tsconfig.json");
+        std::fs::write(
+            &tsconfig,
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["src/*"]}}}"#,
+        )
+        .unwrap();
+
+        let prod_path = src_lib_dir.join("api-client.ts");
+        std::fs::File::create(&prod_path).unwrap();
+
+        let test_path = test_dir.join("api-client.test.ts");
+        let test_source = "describe('api-client', () => { it('loads', async () => { const m = await import('@/lib/api-client'); }); });\n";
+        std::fs::write(&test_path, test_source).unwrap();
+
+        let production_files = vec![prod_path.to_string_lossy().into_owned()];
+        let mut test_sources = std::collections::HashMap::new();
+        test_sources.insert(
+            test_path.to_string_lossy().into_owned(),
+            test_source.to_string(),
+        );
+
+        let extractor = TypeScriptExtractor::new();
+
+        // When: map_test_files_with_imports with tsconfig paths
+        let mappings = extractor.map_test_files_with_imports(
+            &production_files,
+            &test_sources,
+            dir.path(),
+            false,
+        );
+
+        // Then: src/lib/api-client.ts is mapped to api-client.test.ts via dynamic import + alias
+        let mapping = mappings
+            .iter()
+            .find(|m| m.production_file.contains("api-client.ts"))
+            .expect("expected mapping for api-client.ts, got no match");
+        assert!(
+            mapping
+                .test_files
+                .contains(&test_path.to_string_lossy().into_owned()),
+            "expected api-client.test.ts in mapping, got {:?}",
+            mapping.test_files
         );
     }
 
