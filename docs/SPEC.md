@@ -176,7 +176,16 @@ WARN tests/test_order.py:4  T002 mock-overuse (6 mocks across 6 classes)
 テスト関数の行数が閾値を超過。
 
 **Default**: WARN
-**Threshold**: `test_max_lines=50`
+**Threshold**: language-specific defaults (overridable via `test_max_lines`)
+
+| Language | Default | Rationale |
+|----------|---------|-----------|
+| Python | 50 | Aligned with pylint `max-statements=50` |
+| TypeScript | 75 | ESLint default is 50, but Feature Test setup is longer |
+| PHP | 100 | Aligned with PHPMD `ExcessiveMethodLength` |
+| Rust | 100 | Aligned with clippy `too_many_lines` (code lines only) |
+
+When `test_max_lines` is explicitly set in `.exspec.toml`, that value applies to all languages.
 
 #### Python -- Violation
 

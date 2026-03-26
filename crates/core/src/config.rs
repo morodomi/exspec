@@ -127,6 +127,7 @@ impl From<ExspecConfig> for Config {
                 .thresholds
                 .test_max_lines
                 .unwrap_or(defaults.test_max_lines),
+            test_max_lines_is_explicit: ec.thresholds.test_max_lines.is_some(),
             parameterized_min_ratio: ec
                 .thresholds
                 .parameterized_min_ratio
