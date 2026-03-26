@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.5.1 (2026-03-26)
+
+Internal dogfooding across 6 private projects. Major FP reduction and observe recall improvements.
+
+### Features
+
+- **Language-specific T003 thresholds**: PHP=100, TS=75, Rust=100, Python=50. Aligned with PHPMD/clippy/ESLint defaults. PHP WARN 211->39, TS WARN 21->1. (#204)
+- **Python observe manage.py root**: Django projects with code in subdirectories now resolve absolute imports correctly. Python/Django R 6%->44% (89% of mappable tests). (#205)
+- **TS observe dynamic import**: `await import('@/lib/...')` pattern (Vitest/Next.js) now captured. TS/Next.js R 49%->85% (100% of mappable tests). (#206)
+- **PHP observe parent class import propagation**: Parent class imports propagate to child test classes. (#201)
+- **Rust compound cfg(test) detection**: `#[cfg(all(test, ...))]` and `#[cfg(any(test, ...))]` patterns now detected as inline test modules. (#203)
+
+### Internal
+
+- 1255 tests (up from 1237 in v0.5.0).
+- Dogfooded on 6 private projects (3 PHP, 1 TS, 1 Python, 1 multi-lang). All BLOCK 0, observe R>=85%.
+
 ## v0.5.0 (2026-03-25)
 
 Observe multi-language stabilization. All 4 languages now ship-criteria ready. Barrel self-match fix enables Rust observe R>=90% on tower.
